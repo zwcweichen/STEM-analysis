@@ -140,7 +140,7 @@ class MyWindow(QMainWindow):
 
         # 定义探针
         probe = abtem.Probe(
-            energy=200e3, semiangle_cutoff=25, Cs=10e4, defocus="scherzer"
+            energy=80e3, semiangle_cutoff=25, Cs=10e4, defocus="scherzer"
         )
 
         # 定义探测器
@@ -149,8 +149,8 @@ class MyWindow(QMainWindow):
         # 定义扫描区域
         repetitions = (1, 1, 1)
         end = (
-            6 * potential.extent[0] / repetitions[0],
-            6 * potential.extent[0] / repetitions[0],
+            4 * potential.extent[0] / repetitions[0],
+            4 * potential.extent[0] / repetitions[0],
         )
         grid_scan = abtem.GridScan(
             start=[0, 0],
@@ -248,7 +248,7 @@ class MyWindow(QMainWindow):
         return read(filename)
 
     def create_3R_bilayer(self):
-        filename = "C:/研究所/實驗室/光學/資料/20240620_STEM/ZWC/參考資料/新增資料夾/MoS2_2L_3R_test.cif"
+        filename = "C:/git/STEM analysis/atomic model/MoS2_2L_3R_VESTA edit.cif"
         return read(filename)
 
     def create_twisted_bilayer(self):
