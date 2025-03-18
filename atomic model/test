@@ -1,0 +1,158 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.patches import Polygon
+import scipy.stats as stats
+
+# 設置中文字體支持
+plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans', 'Arial Unicode MS']
+plt.rcParams['axes.unicode_minus'] = False
+
+# 模擬數據：Via CD 和對應的 Via RC 值
+np.random.seed(42)
+n_samples = 100
+via_cd = np.linspace(90, 110, n_samples)  # 假設目標Via CD為100，單位為nm
+# 模擬實際Via RC值(假設與Via CD成反比關係，越寬電阻越小)
+via_rc_true = 2000 / via_cd  
+# 添加一些隨機變異以模擬實際測量
+noise = np.random.normal(0, 0.05, n_samples)  
+via_rc = via_rc_true * (1 + noise)
+
+# 進行線性回歸
+slope, intercept, r_value, p_value, std_err = stats.linregress(via_cd, via_rc)
+print(f"迴歸方程: RC = {slope:.4f} × CD + {intercept:.4f}")
+print(f"R方: {r_value**2:.4f}")
+
+# 計算預測值和殘差
+predicted_rc = slope * via_cd + intercept
+residuals = via_rc - predicted_rc
+
+# 設置規格限
+usl_rc = 25.0  # 上規格限
+lsl_rc = 15.0  # 下規格限
+target_rc = 20.0  # 目標值
+
+# 計算製程能力指數
+sigma_rc = np.std(residuals)
+mean_rc = np.mean(via_rc)
+
+cp = (usl_rc - lsl_rc) / (6 * sigma_rc)
+cpu = (usl_rc - mean_rc) / (3 * sigma_rc)
+cpl = (mean_rc - lsl_rc) / (3 * sigma_rc)
+cpk = min(cpu, cpl)
+
+print(f"Cp: {cp:.3f}")
+print(f"Cpk: {cpk:.3f}")
+
+# 創建圖表
+fig = plt.figure(figsize=(18, 12))
+
+# 1. 殘差分析圖
+ax1 = plt.subplot(231)
+ax1.scatter(via_cd, residuals, alpha=0.6)
+ax1.axhline(y=0, color='r', linestyle='-')
+ax1.set_title('殘差分析')
+ax1.set_xlabel('Via CD (nm)')
+ax1.set_ylabel('殘差')
+
+# 添加95%信賴區間
+ci_factor = 1.96
+ci_upper = ci_factor * sigma_rc
+ci_lower = -ci_factor * sigma_rc
+ax1.axhline(y=ci_upper, color='g', linestyle='--', label='95% 信賴區間')
+ax1.axhline(y=ci_lower, color='g', linestyle='--')
+ax1.legend()
+
+# 2. Q-Q圖
+ax2 = plt.subplot(232)
+stats.probplot(residuals, plot=ax2)
+ax2.set_title('正態Q-Q圖')
+
+# 3. 殘差直方圖
+ax3 = plt.subplot(233)
+_, bins, _ = ax3.hist(residuals, bins=15, alpha=0.6, density=True)
+x = np.linspace(min(residuals), max(residuals), 100)
+y = stats.norm.pdf(x, np.mean(residuals), np.std(residuals))
+ax3.plot(x, y, 'r-', linewidth=2)
+ax3.set_title('殘差直方圖與常態分佈擬合')
+ax3.set_xlabel('殘差')
+ax3.set_ylabel('頻率')
+
+# 4. Via CD vs Via RC 散點圖與迴歸線
+ax4 = plt.subplot(234)
+ax4.scatter(via_cd, via_rc, alpha=0.6)
+ax4.plot(via_cd, predicted_rc, 'r-', label='迴歸線')
+
+# 計算並繪製95%信賴區間
+ci_band = ci_factor * std_err * np.sqrt(1 + 1/n_samples + (via_cd - np.mean(via_cd))**2 / np.sum((via_cd - np.mean(via_cd))**2))
+ax4.fill_between(via_cd, predicted_rc - ci_band, predicted_rc + ci_band, alpha=0.2, color='green', label='95% 信賴區間')
+
+ax4.set_title('Via CD vs Via RC')
+ax4.set_xlabel('Via CD (nm)')
+ax4.set_ylabel('Via RC (Ω)')
+ax4.legend()
+
+# 5. 製程能力圖
+ax5 = plt.subplot(235)
+x = np.linspace(mean_rc - 4*sigma_rc, mean_rc + 4*sigma_rc, 1000)
+y = stats.norm.pdf(x, mean_rc, sigma_rc)
+ax5.plot(x, y, 'b-', linewidth=2)
+
+# 填充規格內的面積
+spec_x = np.linspace(lsl_rc, usl_rc, 1000)
+spec_y = stats.norm.pdf(spec_x, mean_rc, sigma_rc)
+ax5.fill_between(spec_x, spec_y, alpha=0.3, color='green')
+
+# 填充規格外的面積
+outside_lower_x = np.linspace(mean_rc - 4*sigma_rc, lsl_rc, 1000)
+outside_lower_y = stats.norm.pdf(outside_lower_x, mean_rc, sigma_rc)
+ax5.fill_between(outside_lower_x, outside_lower_y, alpha=0.3, color='red')
+
+outside_upper_x = np.linspace(usl_rc, mean_rc + 4*sigma_rc, 1000)
+outside_upper_y = stats.norm.pdf(outside_upper_x, mean_rc, sigma_rc)
+ax5.fill_between(outside_upper_x, outside_upper_y, alpha=0.3, color='red')
+
+# 添加規格線
+ax5.axvline(x=lsl_rc, color='r', linestyle='--', label='規格下限')
+ax5.axvline(x=usl_rc, color='r', linestyle='--', label='規格上限')
+ax5.axvline(x=target_rc, color='g', linestyle='-', label='目標值')
+ax5.axvline(x=mean_rc, color='b', linestyle='-', label='實際均值')
+
+# 添加±3 sigma線
+for i in range(1, 4):
+    ax5.axvline(x=mean_rc + i*sigma_rc, color='b', linestyle=':', alpha=0.5)
+    ax5.axvline(x=mean_rc - i*sigma_rc, color='b', linestyle=':', alpha=0.5)
+
+ax5.set_title('Via RC 製程能力分析')
+ax5.set_xlabel('Via RC (Ω)')
+ax5.set_ylabel('頻率')
+ax5.legend()
+
+# 6. 製程能力摘要
+ax6 = plt.subplot(236)
+ax6.axis('off')
+summary_text = f"""製程能力分析摘要
+
+• 樣本數: {n_samples}
+• Via RC 平均值: {mean_rc:.3f} Ω
+• Via RC 標準差: {sigma_rc:.3f} Ω
+• 規格範圍: {lsl_rc} - {usl_rc} Ω
+• 目標值: {target_rc} Ω
+
+製程能力指數:
+• Cp = {cp:.3f} (總體過程能力)
+• Cpu = {cpu:.3f} (上限能力指數)
+• Cpl = {cpl:.3f} (下限能力指數)
+• Cpk = {cpk:.3f} (考慮中心性的能力指數)
+
+能力評估:
+• Cp > 1.33: {"是" if cp > 1.33 else "否"} (代表製程變異性適當)
+• Cpk > 1.33: {"是" if cpk > 1.33 else "否"} (代表製程既穩定又居中)
+
+統計檢驗:
+• 殘差正態性 p值: {stats.shapiro(residuals)[1]:.4f}
+• R² 值: {r_value**2:.4f}
+"""
+ax6.text(0.0, 1.0, summary_text, fontsize=12, va='top')
+
+plt.tight_layout()
+plt.show()
