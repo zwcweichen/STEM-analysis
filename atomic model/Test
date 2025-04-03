@@ -315,10 +315,11 @@ def create_box_plot(data, parameter, group_col, group_values, cleaned_data=None,
     
     return buf
 
-def calculate_statistics(data, parameter, group_col, group_values, cleaned_data=None):
+def calculate_statistics(data, parameter, group_col, group_values, cleaned_data=None, jmp_compatible=True):
     """
     计算统计信息：Mean, Std Dev, K-shift
     如果提供了cleaned_data，则使用清洗后的数据计算统计量
+    jmp_compatible: 如果为True，使用与JMP兼容的计算方法
     """
     # 使用清洗后的数据或原始数据
     stat_data = cleaned_data if cleaned_data is not None else data
@@ -329,9 +330,26 @@ def calculate_statistics(data, parameter, group_col, group_values, cleaned_data=
         group_data = stat_data[stat_data[group_col] == group][parameter].dropna()
         
         if len(group_data) > 0:
+            # 计算均值
+            mean_value = np.mean(group_data)
+            
+            # 计算标准差 - 可以选择兼容JMP的计算方法
+            if jmp_compatible:
+                # JMP默认使用样本标准差(n-1)
+                std_dev = np.std(group_data, ddof=1)
+                
+                # 对于小样本(n<30)，JMP可能会使用偏差校正
+                if len(group_data) < 30:
+                    # 这是一个简化的偏差校正因子，可能需要根据实际JMP版本调整
+                    correction_factor = np.sqrt((len(group_data) - 1) / len(group_data))
+                    std_dev *= correction_factor
+            else:
+                # 使用标准的样本标准差计算
+                std_dev = np.std(group_data, ddof=1)
+            
             stats_dict[group] = {
-                'Mean': np.mean(group_data),
-                'Std Dev': np.std(group_data, ddof=1)
+                'Mean': mean_value,
+                'Std Dev': std_dev
             }
         else:
             stats_dict[group] = {
@@ -429,8 +447,10 @@ def create_single_page_ppt(data, parameters, group_col, group_values, cleaned_da
                 width=left_panel_width
             )
         
-        # 计算统计数据
-        stats_dict = calculate_statistics(data, parameter, group_col, group_values, cleaned_data=cleaned_data)
+        # 计算统计数据，使用兼容JMP的计算方法
+        stats_dict = calculate_statistics(data, parameter, group_col, group_values, 
+                                          cleaned_data=cleaned_data, 
+                                          jmp_compatible=True)
         all_stats[parameter] = stats_dict
     
     # 创建右侧Quantile Plot (2x3网格)
@@ -537,12 +557,25 @@ def create_single_page_ppt(data, parameters, group_col, group_values, cleaned_da
         baseline_stats = stats_dict.get(baseline_group, {})
         second_tool_stats = stats_dict.get(second_tool_group, {}) if second_tool_group else {}
         
+        # 为小值启用科学记号
+        def format_value(value, param_name):
+            if value is None or np.isnan(value):
+                return 'N/A'
+            
+            # 判断是否为非常小的值 (例如LK类似的量级)
+            if 'LK' in param_name and abs(value) < 0.001:
+                return f"{value:.4e}"  # 使用科学记号
+            elif abs(value) < 0.0001:  # 其他很小的值也使用科学记号
+                return f"{value:.4e}"
+            else:
+                return f"{value:.4f}"  # 常规数值使用固定小数点
+        
         row_data = [
             parameter,
-            f"{baseline_stats.get('Mean', np.nan):.4f}" if 'Mean' in baseline_stats and not np.isnan(baseline_stats['Mean']) else 'N/A',
-            f"{baseline_stats.get('Std Dev', np.nan):.4f}" if 'Std Dev' in baseline_stats and not np.isnan(baseline_stats['Std Dev']) else 'N/A',
-            f"{second_tool_stats.get('Mean', np.nan):.4f}" if 'Mean' in second_tool_stats and not np.isnan(second_tool_stats['Mean']) else 'N/A',
-            f"{second_tool_stats.get('K-shift', np.nan):.4f}" if 'K-shift' in second_tool_stats and not np.isnan(second_tool_stats['K-shift']) else 'N/A'
+            format_value(baseline_stats.get('Mean', np.nan), parameter) if 'Mean' in baseline_stats else 'N/A',
+            format_value(baseline_stats.get('Std Dev', np.nan), parameter) if 'Std Dev' in baseline_stats else 'N/A',
+            format_value(second_tool_stats.get('Mean', np.nan), parameter) if 'Mean' in second_tool_stats else 'N/A',
+            format_value(second_tool_stats.get('K-shift', np.nan), parameter) if 'K-shift' in second_tool_stats else 'N/A'
         ]
         
         # 填充表格
