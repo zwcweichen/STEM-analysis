@@ -203,16 +203,35 @@ def create_jmp_quantile_plot(data, parameter, group_col, group_values, cleaned_d
     """
     创建JMP风格的Quantile Plot（凹口向下）并返回图像字节流
     如果提供了cleaned_data，则使用清洗后的数据进行绘图
+    确保Baseline始终是蓝色，2nd tool是绿色
     """
     # 使用清洗后的数据或原始数据
     plot_data = cleaned_data if cleaned_data is not None else data
     
     fig, ax = plt.subplots(figsize=fig_size, dpi=dpi)
     
-    colors = ['blue', 'green']  # BSL蓝色，2nd tool绿色
-    markers = ['o', 's']
+    # 确保Baseline和2nd tool始终是固定颜色
+    color_map = {
+        "Baseline": 'blue',
+        "2nd tool": 'green'
+    }
+    marker_map = {
+        "Baseline": 'o',
+        "2nd tool": 's'
+    }
     
-    for i, group in enumerate(group_values):
+    # 绘制的顺序 - 确保图例显示顺序一致
+    ordered_groups = []
+    for expected_group in ["Baseline", "2nd tool"]:
+        if expected_group in group_values:
+            ordered_groups.append(expected_group)
+    
+    # 如果有其他不在预期内的组，也添加进来
+    for group in group_values:
+        if group not in ordered_groups:
+            ordered_groups.append(group)
+    
+    for group in ordered_groups:
         # 获取当前组的数据
         group_data = plot_data[plot_data[group_col] == group][parameter].dropna()
         
@@ -229,8 +248,11 @@ def create_jmp_quantile_plot(data, parameter, group_col, group_values, cleaned_d
         # 转换为正态分布的分位数
         norm_quantiles = stats.norm.ppf(probabilities)
         
-        # 绘制
-        ax.plot(sorted_data, norm_quantiles, color=colors[i], marker=markers[i],
+        # 绘制 - 使用对应颜色和标记
+        color = color_map.get(group, 'gray')  # 如果不是预期组，使用灰色
+        marker = marker_map.get(group, '^')
+        
+        ax.plot(sorted_data, norm_quantiles, color=color, marker=marker,
                 linestyle='-', label=group, markersize=4)
     
     # 添加标题
@@ -270,17 +292,29 @@ def create_box_plot(data, parameter, group_col, group_values, cleaned_data=None,
     """
     创建Box Plot比较不同工具类别并返回图像字节流
     如果提供了cleaned_data，则使用清洗后的数据进行绘图
+    确保Baseline始终在左侧(蓝色)，2nd tool在右侧(绿色)
     """
     # 使用清洗后的数据或原始数据
     plot_data = cleaned_data if cleaned_data is not None else data
     
     fig, ax = plt.subplots(figsize=fig_size, dpi=dpi)
     
+    # 确保Baseline总是第一个，2nd tool总是第二个
+    ordered_groups = []
+    for expected_group in ["Baseline", "2nd tool"]:
+        if expected_group in group_values:
+            ordered_groups.append(expected_group)
+    
+    # 如果有其他不在预期内的组，也添加进来
+    for group in group_values:
+        if group not in ordered_groups:
+            ordered_groups.append(group)
+    
     # 准备数据
     box_data = []
     valid_labels = []
     
-    for group in group_values:
+    for group in ordered_groups:
         group_data = plot_data[plot_data[group_col] == group][parameter].dropna()
         if len(group_data) > 0:
             box_data.append(group_data)
@@ -294,8 +328,16 @@ def create_box_plot(data, parameter, group_col, group_values, cleaned_data=None,
     # 创建箱线图
     boxplot = ax.boxplot(box_data, patch_artist=True, tick_labels=valid_labels)
     
-    # 设置颜色
-    colors = ['lightblue', 'lightgreen']
+    # 设置颜色 - 确保Baseline是蓝色(lightblue)，2nd tool是绿色(lightgreen)
+    colors = []
+    for label in valid_labels:
+        if label == "Baseline":
+            colors.append('lightblue')
+        elif label == "2nd tool":
+            colors.append('lightgreen')
+        else:
+            colors.append('lightgray')  # 默认颜色
+            
     for i, patch in enumerate(boxplot['boxes']):
         if i < len(colors):
             patch.set_facecolor(colors[i])
@@ -380,6 +422,27 @@ def create_single_page_ppt(data, parameters, group_col, group_values, cleaned_da
     创建单页PPT报告，包含所有参数的分析
     如果提供了cleaned_data，则使用清洗后的数据进行绘图和计算
     """
+    # 在创建PPT之前，确保组的排序，Baseline应在第一位
+    ordered_group_values = []
+    
+    # 确保Baseline总是第一个，2nd tool总是第二个
+    for expected_group in ["Baseline", "2nd tool"]:
+        if expected_group in group_values:
+            ordered_group_values.append(expected_group)
+    
+    # 添加其他可能的组
+    for group in group_values:
+        if group not in ordered_group_values:
+            ordered_group_values.append(group)
+    
+    # 确保至少有一个组
+    if not ordered_group_values:
+        ordered_group_values = group_values
+        
+    # 获取正确的基线组和对照组
+    baseline_group = ordered_group_values[0]  # 第一个组视为基线
+    second_tool_group = ordered_group_values[1] if len(ordered_group_values) > 1 else None
+    
     # 创建演示文稿
     prs = Presentation()
     
@@ -433,7 +496,7 @@ def create_single_page_ppt(data, parameters, group_col, group_values, cleaned_da
             data, 
             parameter, 
             group_col, 
-            group_values, 
+            ordered_group_values, 
             cleaned_data=cleaned_data,
             fig_size=(4, 1.7), 
             dpi=100
@@ -448,7 +511,7 @@ def create_single_page_ppt(data, parameters, group_col, group_values, cleaned_da
             )
         
         # 计算统计数据，使用兼容JMP的计算方法
-        stats_dict = calculate_statistics(data, parameter, group_col, group_values, 
+        stats_dict = calculate_statistics(data, parameter, group_col, ordered_group_values, 
                                           cleaned_data=cleaned_data, 
                                           jmp_compatible=True)
         all_stats[parameter] = stats_dict
@@ -476,7 +539,7 @@ def create_single_page_ppt(data, parameters, group_col, group_values, cleaned_da
                 data, 
                 parameter, 
                 group_col, 
-                group_values,
+                ordered_group_values,
                 cleaned_data=cleaned_data, 
                 fig_size=(2.9, 1.7), 
                 dpi=100
@@ -507,19 +570,22 @@ def create_single_page_ppt(data, parameters, group_col, group_values, cleaned_da
     for i in range(1, 5):
         table.columns[i].width = Inches(1.75)
     
-    # 添加表头 - 修复版本
+    # 添加表头 - 完全符合JMP风格
+    baseline_group = group_values[0] if "Baseline" in group_values else group_values[0]
+    second_tool_group = group_values[1] if "2nd tool" in group_values else (group_values[1] if len(group_values) > 1 else None)
+    
     header_cells = [
-        "Condition", group_values[0], "", group_values[1], ""
+        "Condition", baseline_group, "", second_tool_group, ""
     ]
     for i, text in enumerate(header_cells):
         cell = table.cell(0, i)
-        cell.text = text
+        cell.text = text if text is not None else ""
         # 安全地设置粗体和字体大小
         para = cell.text_frame.paragraphs[0]
         para.alignment = PP_ALIGN.CENTER
         if not para.runs:
             run = para.add_run()
-            run.text = text
+            run.text = text if text is not None else ""
         else:
             run = para.runs[0]
         run.font.bold = True
@@ -550,8 +616,9 @@ def create_single_page_ppt(data, parameters, group_col, group_values, cleaned_da
         if not stats_dict:
             continue
             
-        baseline_group = group_values[0]
-        second_tool_group = group_values[1] if len(group_values) > 1 else None
+        # 确保统计计算是对正确的组
+        baseline_group = baseline_group if baseline_group in stats_dict else list(stats_dict.keys())[0]
+        second_tool_group = second_tool_group if second_tool_group in stats_dict else (list(stats_dict.keys())[1] if len(stats_dict) > 1 else None)
         
         # 准备数据
         baseline_stats = stats_dict.get(baseline_group, {})
