@@ -89,6 +89,14 @@ def transform_data(query_data, condition_data):
         condition_types = ["Baseline", "2nd tool"]
         print(f"使用默认条件类型: {condition_types}")
     
+    # 获取参数列表 - 从query_data的parameter_col列中提取唯一值
+    if parameter_col and parameter_col in query_data.columns:
+        measure_parameters = query_data[parameter_col].unique()
+        print(f"发现的电性量测项目: {measure_parameters}")
+    else:
+        measure_parameters = ["Con_M3LA", "Con_M3LB", "Rc_V2v", "LK_M3LA", "LK_M3LB"]
+        print(f"使用默认电性量测项目: {measure_parameters}")
+    
     # 合并数据
     print("\n合并数据...")
     merged_data = pd.merge(
@@ -113,7 +121,7 @@ def transform_data(query_data, condition_data):
         
         print(f"数据透视表形状: {pivot_data.shape}")
         
-        return pivot_data, condition_types
+        return pivot_data, condition_types, measure_parameters
     
     except Exception as e:
         print(f"创建数据透视表时出错: {e}")
@@ -139,7 +147,7 @@ def transform_data(query_data, condition_data):
         
         print(f"备用转换数据形状: {transformed_data.shape}")
         
-        return transformed_data, condition_types
+        return transformed_data, condition_types, measure_parameters
 
 def create_jmp_quantile_plot(data, parameter, group_col, group_values, fig_size=(3, 3), dpi=100):
     """
@@ -541,7 +549,7 @@ def main():
             raise Exception("无法读取实际数据文件")
         
         # 转换数据
-        transformed_data, condition_types = transform_data(query_data, condition_data)
+        transformed_data, condition_types, measure_parameters = transform_data(query_data, condition_data)
         
     except Exception as e:
         print(f"使用实际数据时出错: {e}")
@@ -551,7 +559,7 @@ def main():
         query_data, condition_data = create_sample_data(30)
         
         # 转换模拟数据
-        transformed_data, condition_types = transform_data(query_data, condition_data)
+        transformed_data, condition_types, measure_parameters = transform_data(query_data, condition_data)
     
     # 查找列名
     # 查找条件列
@@ -568,23 +576,30 @@ def main():
                 condition_col = col
                 break
     
-    # 获取数据参数列（除了Wafer ID和Condition之外的所有列）
-    parameters = []
-    for col in transformed_data.columns:
-        if "wafer" not in col.lower() and col != condition_col:
-            parameters.append(col)
+    # 使用从query_data中提取的电性量测项目作为参数列表
+    # 注意：这些参数必须在transformed_data中存在
+    available_parameters = []
+    for param in measure_parameters:
+        if param in transformed_data.columns:
+            available_parameters.append(param)
+    
+    if len(available_parameters) == 0:
+        # 如果没有找到可用参数，则尝试使用transformed_data中的所有非ID、非条件列
+        for col in transformed_data.columns:
+            if "wafer" not in col.lower() and col != condition_col:
+                available_parameters.append(col)
     
     print(f"\n使用条件列: {condition_col}")
-    print(f"发现的参数: {parameters}")
+    print(f"可用的电性量测参数: {available_parameters}")
     
     # 确保有条件列和至少一个参数
-    if not condition_col or not parameters:
+    if not condition_col or not available_parameters:
         print("无法找到必要的列，请检查数据格式")
         return
     
     # 创建单页PPT
     output_file = 'Wafer_Measurement_Analysis.pptx'
-    create_single_page_ppt(transformed_data, parameters, condition_col, condition_types, output_file)
+    create_single_page_ppt(transformed_data, available_parameters, condition_col, condition_types, output_file)
     
     print("\n分析总结:")
     print("1. JMP风格Quantile Plot凹口向下是由于使用(i-0.375)/(n+0.25)概率公式")
