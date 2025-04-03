@@ -12,6 +12,135 @@ from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import PP_ALIGN
 
+def read_data(query_file, condition_file):
+    """
+    读取查询数据和条件数据
+    处理列名差异（Wafer ID vs WaferID）
+    """
+    try:
+        query_data = pd.read_excel(query_file)
+        condition_data = pd.read_excel(condition_file)
+        
+        print(f"成功读取 {query_file} 和 {condition_file}")
+        print(f"IEDA2_query.xlsx 形状: {query_data.shape}")
+        print(f"condition_list.xlsx 形状: {condition_data.shape}")
+        
+        # 检查列名
+        print("\nIEDA2_query.xlsx 列名:", query_data.columns.tolist())
+        print("condition_list.xlsx 列名:", condition_data.columns.tolist())
+        
+        return query_data, condition_data
+    except Exception as e:
+        print(f"读取文件时出错: {e}")
+        return None, None
+
+def transform_data(query_data, condition_data):
+    """
+    将查询数据和条件数据转换为所需的格式
+    处理列名差异（Wafer ID vs WaferID）
+    处理Condition列包含BSL和2nd tool信息
+    """
+    # 查找查询数据中的Wafer ID列
+    wafer_id_query = "Wafer ID" if "Wafer ID" in query_data.columns else "WaferID"
+    if wafer_id_query not in query_data.columns:
+        # 寻找可能包含wafer id的列
+        for col in query_data.columns:
+            if "wafer" in col.lower():
+                wafer_id_query = col
+                break
+    
+    # 查找条件数据中的WaferID列
+    wafer_id_condition = "WaferID" if "WaferID" in condition_data.columns else "Wafer ID"
+    if wafer_id_condition not in condition_data.columns:
+        # 寻找可能包含wafer id的列
+        for col in condition_data.columns:
+            if "wafer" in col.lower():
+                wafer_id_condition = col
+                break
+    
+    # 查找参数名列和值列
+    parameter_col = None
+    value_col = None
+    for col in query_data.columns:
+        if "parameter" in col.lower() or "name" in col.lower():
+            parameter_col = col
+        elif "value" in col.lower() or "site value" in col.lower():
+            value_col = col
+    
+    # 查找条件列
+    condition_col = None
+    for col in condition_data.columns:
+        if "condition" in col.lower():
+            condition_col = col
+            break
+    
+    print(f"\n使用以下列名进行数据处理:")
+    print(f"查询数据Wafer ID列: {wafer_id_query}")
+    print(f"条件数据WaferID列: {wafer_id_condition}")
+    print(f"参数名列: {parameter_col}")
+    print(f"值列: {value_col}")
+    print(f"条件列: {condition_col}")
+    
+    # 获取条件类型（通常是Baseline和2nd tool）
+    if condition_col and condition_col in condition_data.columns:
+        condition_types = condition_data[condition_col].unique()
+        print(f"发现的条件类型: {condition_types}")
+    else:
+        condition_types = ["Baseline", "2nd tool"]
+        print(f"使用默认条件类型: {condition_types}")
+    
+    # 合并数据
+    print("\n合并数据...")
+    merged_data = pd.merge(
+        query_data, 
+        condition_data, 
+        left_on=wafer_id_query, 
+        right_on=wafer_id_condition, 
+        how='left'
+    )
+    
+    # 创建数据透视表
+    try:
+        print("创建数据透视表...")
+        # 先按Wafer ID和Parameter Name取平均，再创建透视表
+        grouped_data = merged_data.groupby([wafer_id_query, parameter_col, condition_col])[value_col].mean().reset_index()
+        
+        pivot_data = grouped_data.pivot_table(
+            index=[wafer_id_query, condition_col],
+            columns=parameter_col,
+            values=value_col
+        ).reset_index()
+        
+        print(f"数据透视表形状: {pivot_data.shape}")
+        
+        return pivot_data, condition_types
+    
+    except Exception as e:
+        print(f"创建数据透视表时出错: {e}")
+        
+        # 备用方法
+        print("使用备用方法...")
+        
+        # 获取唯一的参数
+        unique_params = merged_data[parameter_col].unique()
+        print(f"找到 {len(unique_params)} 个唯一参数")
+        
+        # 创建新的数据框
+        transformed_data = merged_data[[wafer_id_query, condition_col]].drop_duplicates()
+        
+        # 为每个参数创建列
+        for param in unique_params:
+            param_data = merged_data[merged_data[parameter_col] == param]
+            param_data_grouped = param_data.groupby(wafer_id_query)[value_col].mean().reset_index()
+            param_data_grouped = param_data_grouped.rename(columns={value_col: param})
+            
+            # 合并到转换后的数据
+            transformed_data = pd.merge(transformed_data, param_data_grouped, on=wafer_id_query, how='left')
+        
+        print(f"备用转换数据形状: {transformed_data.shape}")
+        
+        return transformed_data, condition_types
+
 def create_jmp_quantile_plot(data, parameter, group_col, group_values, fig_size=(3, 3), dpi=100):
     """
     创建JMP风格的Quantile Plot（凹口向下）并返回图像字节流
@@ -140,14 +269,21 @@ def calculate_statistics(data, parameter, group_col, group_values):
                 'Std Dev': np.nan
             }
     
-    # 计算K-shift
-    if len(group_values) >= 2 and not np.isnan(stats_dict[group_values[0]]['Std Dev']) and stats_dict[group_values[0]]['Std Dev'] != 0:
-        stats_dict[group_values[1]]['K-shift'] = (
-            stats_dict[group_values[1]]['Mean'] - stats_dict[group_values[0]]['Mean']
-        ) / stats_dict[group_values[0]]['Std Dev']
-    else:
-        if group_values[1] in stats_dict:
-            stats_dict[group_values[1]]['K-shift'] = np.nan
+    # 计算K-shift (如果有两个或更多组)
+    if len(group_values) >= 2:
+        baseline_group = group_values[0]  # 假设第一个为baseline
+        second_tool_group = group_values[1]  # 假设第二个为2nd tool
+        
+        if (baseline_group in stats_dict and second_tool_group in stats_dict and
+            not np.isnan(stats_dict[baseline_group]['Std Dev']) and
+            stats_dict[baseline_group]['Std Dev'] != 0):
+            
+            stats_dict[second_tool_group]['K-shift'] = (
+                stats_dict[second_tool_group]['Mean'] - stats_dict[baseline_group]['Mean']
+            ) / stats_dict[baseline_group]['Std Dev']
+        else:
+            if second_tool_group in stats_dict:
+                stats_dict[second_tool_group]['K-shift'] = np.nan
     
     return stats_dict
 
@@ -280,7 +416,7 @@ def create_single_page_ppt(data, parameters, group_col, group_values, output_fil
     
     # 添加表头 - 修复版本
     header_cells = [
-        "Condition", "BSL", "", "2nd tool", ""
+        "Condition", group_values[0], "", group_values[1], ""
     ]
     for i, text in enumerate(header_cells):
         cell = table.cell(0, i)
@@ -321,19 +457,19 @@ def create_single_page_ppt(data, parameters, group_col, group_values, output_fil
         if not stats_dict:
             continue
             
-        bsl_group = list(stats_dict.keys())[0]
-        second_group = list(stats_dict.keys())[1] if len(stats_dict) > 1 else None
+        baseline_group = group_values[0]
+        second_tool_group = group_values[1] if len(group_values) > 1 else None
         
         # 准备数据
-        bsl_stats = stats_dict.get(bsl_group, {})
-        second_stats = stats_dict.get(second_group, {}) if second_group else {}
+        baseline_stats = stats_dict.get(baseline_group, {})
+        second_tool_stats = stats_dict.get(second_tool_group, {}) if second_tool_group else {}
         
         row_data = [
             parameter,
-            f"{bsl_stats.get('Mean', np.nan):.4f}" if 'Mean' in bsl_stats and not np.isnan(bsl_stats['Mean']) else 'N/A',
-            f"{bsl_stats.get('Std Dev', np.nan):.4f}" if 'Std Dev' in bsl_stats and not np.isnan(bsl_stats['Std Dev']) else 'N/A',
-            f"{second_stats.get('Mean', np.nan):.4f}" if 'Mean' in second_stats and not np.isnan(second_stats['Mean']) else 'N/A',
-            f"{second_stats.get('K-shift', np.nan):.4f}" if 'K-shift' in second_stats and not np.isnan(second_stats['K-shift']) else 'N/A'
+            f"{baseline_stats.get('Mean', np.nan):.4f}" if 'Mean' in baseline_stats and not np.isnan(baseline_stats['Mean']) else 'N/A',
+            f"{baseline_stats.get('Std Dev', np.nan):.4f}" if 'Std Dev' in baseline_stats and not np.isnan(baseline_stats['Std Dev']) else 'N/A',
+            f"{second_tool_stats.get('Mean', np.nan):.4f}" if 'Mean' in second_tool_stats and not np.isnan(second_tool_stats['Mean']) else 'N/A',
+            f"{second_tool_stats.get('K-shift', np.nan):.4f}" if 'K-shift' in second_tool_stats and not np.isnan(second_tool_stats['K-shift']) else 'N/A'
         ]
         
         # 填充表格
@@ -357,19 +493,19 @@ def create_single_page_ppt(data, parameters, group_col, group_values, output_fil
 
 def create_sample_data(n_wafers=30):
     """
-    创建模拟数据集
+    创建模拟数据集，包含Wafer ID和WaferID的差异，
+    以及Condition列替代BSL和2nd tool
     """
     # 创建wafer IDs
     wafer_ids = [f'Wafer_{i:03d}' for i in range(1, n_wafers+1)]
     
-    # 工具类别
-    tools = ['Tool_A', 'Tool_B']
+    # 条件类型
+    condition_types = ['Baseline', '2nd tool']
     
     # 创建condition_list数据
     condition_data = pd.DataFrame({
-        'Wafer ID': wafer_ids,
-        'BSL': np.random.choice(tools, size=n_wafers),
-        '2nd tool': np.random.choice(tools, size=n_wafers)
+        'WaferID': wafer_ids,
+        'Condition': np.random.choice(condition_types, size=n_wafers)
     })
     
     # 创建量测数据
@@ -392,72 +528,7 @@ def create_sample_data(n_wafers=30):
     
     query_data = pd.DataFrame(rows)
     
-    return condition_data, query_data
-
-def transform_data(query_data, condition_data):
-    """
-    将查询数据和条件数据转换为所需的格式
-    """
-    # 假设列名如下，需根据实际情况调整
-    wafer_id_col = 'Wafer ID'
-    parameter_col = 'Parameter Name'
-    value_col = 'Site Value'
-    bsl_col = 'BSL'
-    second_tool_col = '2nd tool'
-    
-    # 合并数据
-    merged_data = pd.merge(query_data, condition_data, on=wafer_id_col, how='left')
-    
-    # 创建数据透视表
-    try:
-        # 先按Wafer ID和Parameter Name取平均，再创建透视表
-        grouped_data = merged_data.groupby([wafer_id_col, parameter_col, bsl_col, second_tool_col])[value_col].mean().reset_index()
-        
-        pivot_data = grouped_data.pivot_table(
-            index=[wafer_id_col, bsl_col, second_tool_col],
-            columns=parameter_col,
-            values=value_col
-        ).reset_index()
-        
-        return pivot_data
-    
-    except Exception as e:
-        print(f"创建数据透视表时出错: {e}")
-        
-        # 备用方法
-        print("使用备用方法...")
-        
-        # 获取唯一的参数
-        unique_params = merged_data[parameter_col].unique()
-        
-        # 创建新的数据框
-        transformed_data = merged_data[[wafer_id_col, bsl_col, second_tool_col]].drop_duplicates()
-        
-        # 为每个参数创建列
-        for param in unique_params:
-            param_data = merged_data[merged_data[parameter_col] == param]
-            param_data_grouped = param_data.groupby(wafer_id_col)[value_col].mean().reset_index()
-            param_data_grouped = param_data_grouped.rename(columns={value_col: param})
-            
-            # 合并到转换后的数据
-            transformed_data = pd.merge(transformed_data, param_data_grouped, on=wafer_id_col, how='left')
-        
-        return transformed_data
-
-def read_data(query_file, condition_file):
-    """
-    读取查询数据和条件数据
-    """
-    try:
-        query_data = pd.read_excel(query_file)
-        condition_data = pd.read_excel(condition_file)
-        
-        print(f"成功读取 {query_file} 和 {condition_file}")
-        
-        return query_data, condition_data
-    except Exception as e:
-        print(f"读取文件时出错: {e}")
-        return None, None
+    return query_data, condition_data
 
 def main():
     """
@@ -470,28 +541,50 @@ def main():
             raise Exception("无法读取实际数据文件")
         
         # 转换数据
-        transformed_data = transform_data(query_data, condition_data)
+        transformed_data, condition_types = transform_data(query_data, condition_data)
         
     except Exception as e:
         print(f"使用实际数据时出错: {e}")
         print("将创建模拟数据继续演示...")
         
         # 创建模拟数据
-        condition_data, query_data = create_sample_data(30)
+        query_data, condition_data = create_sample_data(30)
         
         # 转换模拟数据
-        transformed_data = transform_data(query_data, condition_data)
+        transformed_data, condition_types = transform_data(query_data, condition_data)
     
-    # 参数列表
-    parameters = ['Con_M3LA', 'Con_M3LB', 'Rc_V2v', 'LK_M3LA', 'LK_M3LB']
+    # 查找列名
+    # 查找条件列
+    condition_col = None
+    for col in transformed_data.columns:
+        if "condition" in col.lower():
+            condition_col = col
+            break
     
-    # 工具类别分组列名和值
-    group_col = 'BSL'  # 使用BSL列作为分组
-    group_values = ['Tool_A', 'Tool_B']  # 假设工具值
+    if not condition_col:
+        # 查找可能的条件列（除了Wafer ID之外的第一列）
+        for col in transformed_data.columns:
+            if "wafer" not in col.lower():
+                condition_col = col
+                break
+    
+    # 获取数据参数列（除了Wafer ID和Condition之外的所有列）
+    parameters = []
+    for col in transformed_data.columns:
+        if "wafer" not in col.lower() and col != condition_col:
+            parameters.append(col)
+    
+    print(f"\n使用条件列: {condition_col}")
+    print(f"发现的参数: {parameters}")
+    
+    # 确保有条件列和至少一个参数
+    if not condition_col or not parameters:
+        print("无法找到必要的列，请检查数据格式")
+        return
     
     # 创建单页PPT
     output_file = 'Wafer_Measurement_Analysis.pptx'
-    create_single_page_ppt(transformed_data, parameters, group_col, group_values, output_file)
+    create_single_page_ppt(transformed_data, parameters, condition_col, condition_types, output_file)
     
     print("\n分析总结:")
     print("1. JMP风格Quantile Plot凹口向下是由于使用(i-0.375)/(n+0.25)概率公式")
