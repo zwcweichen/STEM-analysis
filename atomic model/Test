@@ -62,7 +62,7 @@ def transform_data(query_data, condition_data):
     parameter_col = None
     value_col = None
     for col in query_data.columns:
-        if "parameter" in col.lower() or "name" in col.lower():
+        if "Parameter Name" in col or "name" in col.lower():
             parameter_col = col
         elif "value" in col.lower() or "site value" in col.lower():
             value_col = col
@@ -121,7 +121,7 @@ def transform_data(query_data, condition_data):
         
         print(f"数据透视表形状: {pivot_data.shape}")
         
-        return pivot_data, condition_types, measure_parameters
+        return pivot_data, condition_types, measure_parameters, wafer_id_query, condition_col
     
     except Exception as e:
         print(f"创建数据透视表时出错: {e}")
@@ -147,12 +147,66 @@ def transform_data(query_data, condition_data):
         
         print(f"备用转换数据形状: {transformed_data.shape}")
         
-        return transformed_data, condition_types, measure_parameters
+        return transformed_data, condition_types, measure_parameters, wafer_id_query, condition_col
 
-def create_jmp_quantile_plot(data, parameter, group_col, group_values, fig_size=(3, 3), dpi=100):
+def remove_outliers(data, parameter, group_col, group_values, method='iqr', k=1.5):
+    """
+    移除异常值但不修改原始数据
+    method: 'iqr' 使用四分位距法, 'zscore' 使用Z-score法
+    k: IQR方法的倍数或Z-score方法的阈值
+    返回移除异常值后的数据副本
+    """
+    # 创建数据副本，避免修改原始数据
+    clean_data = data.copy()
+    
+    # 对每个组应用异常值检测
+    for group in group_values:
+        # 获取组内参数数据
+        mask = data[group_col] == group
+        group_data = data.loc[mask, parameter]
+        
+        if len(group_data) <= 3:  # 样本太少，不做异常值检测
+            continue
+        
+        if method == 'iqr':
+            # IQR方法
+            Q1 = group_data.quantile(0.25)
+            Q3 = group_data.quantile(0.75)
+            IQR = Q3 - Q1
+            lower_bound = Q1 - k * IQR
+            upper_bound = Q3 + k * IQR
+            
+            # 标记组内异常值
+            outlier_mask = (group_data < lower_bound) | (group_data > upper_bound)
+            
+        elif method == 'zscore':
+            # Z-score方法
+            z_scores = np.abs(stats.zscore(group_data))
+            outlier_mask = z_scores > k
+            
+        else:
+            raise ValueError(f"不支持的异常值检测方法: {method}")
+        
+        # 在副本中设置异常值为NaN
+        if outlier_mask.any():
+            outlier_indices = group_data[outlier_mask].index
+            clean_data.loc[outlier_indices, parameter] = np.nan
+            
+            # 打印异常值信息
+            n_outliers = outlier_mask.sum()
+            if n_outliers > 0:
+                print(f"参数 {parameter}, 组 {group}: 发现 {n_outliers} 个异常值")
+    
+    return clean_data
+
+def create_jmp_quantile_plot(data, parameter, group_col, group_values, cleaned_data=None, fig_size=(3, 3), dpi=100):
     """
     创建JMP风格的Quantile Plot（凹口向下）并返回图像字节流
+    如果提供了cleaned_data，则使用清洗后的数据进行绘图
     """
+    # 使用清洗后的数据或原始数据
+    plot_data = cleaned_data if cleaned_data is not None else data
+    
     fig, ax = plt.subplots(figsize=fig_size, dpi=dpi)
     
     colors = ['blue', 'green']  # BSL蓝色，2nd tool绿色
@@ -160,7 +214,7 @@ def create_jmp_quantile_plot(data, parameter, group_col, group_values, fig_size=
     
     for i, group in enumerate(group_values):
         # 获取当前组的数据
-        group_data = data[data[group_col] == group][parameter].dropna()
+        group_data = plot_data[plot_data[group_col] == group][parameter].dropna()
         
         if len(group_data) == 0:
             continue
@@ -212,10 +266,14 @@ def create_jmp_quantile_plot(data, parameter, group_col, group_values, fig_size=
     
     return buf
 
-def create_box_plot(data, parameter, group_col, group_values, fig_size=(3, 3), dpi=100):
+def create_box_plot(data, parameter, group_col, group_values, cleaned_data=None, fig_size=(3, 3), dpi=100):
     """
     创建Box Plot比较不同工具类别并返回图像字节流
+    如果提供了cleaned_data，则使用清洗后的数据进行绘图
     """
+    # 使用清洗后的数据或原始数据
+    plot_data = cleaned_data if cleaned_data is not None else data
+    
     fig, ax = plt.subplots(figsize=fig_size, dpi=dpi)
     
     # 准备数据
@@ -223,7 +281,7 @@ def create_box_plot(data, parameter, group_col, group_values, fig_size=(3, 3), d
     valid_labels = []
     
     for group in group_values:
-        group_data = data[data[group_col] == group][parameter].dropna()
+        group_data = plot_data[plot_data[group_col] == group][parameter].dropna()
         if len(group_data) > 0:
             box_data.append(group_data)
             valid_labels.append(group)
@@ -257,14 +315,18 @@ def create_box_plot(data, parameter, group_col, group_values, fig_size=(3, 3), d
     
     return buf
 
-def calculate_statistics(data, parameter, group_col, group_values):
+def calculate_statistics(data, parameter, group_col, group_values, cleaned_data=None):
     """
     计算统计信息：Mean, Std Dev, K-shift
+    如果提供了cleaned_data，则使用清洗后的数据计算统计量
     """
+    # 使用清洗后的数据或原始数据
+    stat_data = cleaned_data if cleaned_data is not None else data
+    
     stats_dict = {}
     
     for group in group_values:
-        group_data = data[data[group_col] == group][parameter].dropna()
+        group_data = stat_data[stat_data[group_col] == group][parameter].dropna()
         
         if len(group_data) > 0:
             stats_dict[group] = {
@@ -295,9 +357,10 @@ def calculate_statistics(data, parameter, group_col, group_values):
     
     return stats_dict
 
-def create_single_page_ppt(data, parameters, group_col, group_values, output_file='Wafer_Analysis_Report.pptx'):
+def create_single_page_ppt(data, parameters, group_col, group_values, cleaned_data=None, output_file='Wafer_Analysis_Report.pptx'):
     """
     创建单页PPT报告，包含所有参数的分析
+    如果提供了cleaned_data，则使用清洗后的数据进行绘图和计算
     """
     # 创建演示文稿
     prs = Presentation()
@@ -310,8 +373,8 @@ def create_single_page_ppt(data, parameters, group_col, group_values, output_fil
     blank_slide_layout = prs.slide_layouts[6]  # 空白布局
     slide = prs.slides.add_slide(blank_slide_layout)
     
-    # 添加标题
-    title_shape = slide.shapes.add_textbox(Inches(0), Inches(0.2), Inches(10), Inches(0.5))
+    # 添加标题 - 位置调高
+    title_shape = slide.shapes.add_textbox(Inches(0), Inches(0.1), Inches(10), Inches(0.5))
     title_frame = title_shape.text_frame
     title_para = title_frame.add_paragraph()
     title_para.text = "Wafer Measurement Analysis Report"
@@ -322,13 +385,13 @@ def create_single_page_ppt(data, parameters, group_col, group_values, output_fil
     
     # 左侧放置Box Plot
     left_panel_x = Inches(0.2)
-    left_panel_y = Inches(0.8)
+    left_panel_y = Inches(0.7)  # 位置调高
     left_panel_width = Inches(3.5)
     left_panel_height = Inches(5.0)
     
     # 右侧放置Quantile Plot (2x3网格)
     right_panel_x = Inches(3.8)
-    right_panel_y = Inches(0.8)
+    right_panel_y = Inches(0.7)  # 位置调高
     right_panel_width = Inches(6.0)
     right_panel_height = Inches(5.0)
     
@@ -353,6 +416,7 @@ def create_single_page_ppt(data, parameters, group_col, group_values, output_fil
             parameter, 
             group_col, 
             group_values, 
+            cleaned_data=cleaned_data,
             fig_size=(4, 1.7), 
             dpi=100
         )
@@ -366,7 +430,7 @@ def create_single_page_ppt(data, parameters, group_col, group_values, output_fil
             )
         
         # 计算统计数据
-        stats_dict = calculate_statistics(data, parameter, group_col, group_values)
+        stats_dict = calculate_statistics(data, parameter, group_col, group_values, cleaned_data=cleaned_data)
         all_stats[parameter] = stats_dict
     
     # 创建右侧Quantile Plot (2x3网格)
@@ -392,7 +456,8 @@ def create_single_page_ppt(data, parameters, group_col, group_values, output_fil
                 data, 
                 parameter, 
                 group_col, 
-                group_values, 
+                group_values,
+                cleaned_data=cleaned_data, 
                 fig_size=(2.9, 1.7), 
                 dpi=100
             )
@@ -404,7 +469,7 @@ def create_single_page_ppt(data, parameters, group_col, group_values, output_fil
                 width=quantile_plot_width
             )
     
-    # 创建底部的统计表格
+    # 创建底部的统计表格 - 调整位置和大小
     table_rows = len(parameters) + 2  # 参数数量 + 标题两行
     table_cols = 5  # Condition, BSL Mean, BSL Std Dev, 2nd Tool Mean, K-shift
     
@@ -412,7 +477,7 @@ def create_single_page_ppt(data, parameters, group_col, group_values, output_fil
         table_rows, 
         table_cols,
         Inches(0.5), 
-        Inches(5.9),
+        Inches(5.8),  # 位置略向上调整
         Inches(9), 
         Inches(1.5)
     ).table
@@ -499,6 +564,40 @@ def create_single_page_ppt(data, parameters, group_col, group_values, output_fil
     
     return output_file
 
+def export_to_excel(data, wafer_id_col, condition_col, output_file='Wafer_Measurement_Data.xlsx'):
+    """
+    将处理后的数据导出到Excel
+    """
+    try:
+        # 创建一个ExcelWriter对象
+        with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+            # 导出主数据表
+            data.to_excel(writer, sheet_name='Transformed_Data', index=False)
+            
+            # 创建分组数据的表
+            conditions = data[condition_col].unique()
+            for condition in conditions:
+                condition_data = data[data[condition_col] == condition]
+                # 获取不包含wafer_id和condition列的纯测量数据
+                measure_data = condition_data.drop(columns=[wafer_id_col, condition_col])
+                
+                # 创建描述性统计信息表
+                stats_df = measure_data.describe().T
+                
+                # 将条件特定数据和统计信息导出到单独的表
+                sheet_name = f"{condition}_Data"[:31]  # Excel表名最长为31个字符
+                condition_data.to_excel(writer, sheet_name=sheet_name, index=False)
+                
+                # 统计信息表
+                stats_sheet_name = f"{condition}_Stats"[:31]
+                stats_df.to_excel(writer, sheet_name=stats_sheet_name)
+        
+        print(f"数据已导出到Excel: {output_file}")
+        return True
+    except Exception as e:
+        print(f"导出Excel时出错: {e}")
+        return False
+
 def create_sample_data(n_wafers=30):
     """
     创建模拟数据集，包含Wafer ID和WaferID的差异，
@@ -525,8 +624,13 @@ def create_sample_data(n_wafers=30):
             # 为每个wafer和每个参数创建多个site测量
             n_sites = np.random.randint(1, 5)
             for site in range(1, n_sites+1):
-                # 随机生成0-9之间的值
+                # 随机生成0-9之间的值，添加少量异常值
                 value = np.random.uniform(0, 9)
+                
+                # 5%的概率生成异常值
+                if np.random.random() < 0.05:
+                    value = value * (3 + np.random.random() * 2)  # 3-5倍的异常值
+                
                 rows.append({
                     'Wafer ID': wafer_id,
                     'Parameter Name': param,
@@ -549,7 +653,7 @@ def main():
             raise Exception("无法读取实际数据文件")
         
         # 转换数据
-        transformed_data, condition_types, measure_parameters = transform_data(query_data, condition_data)
+        transformed_data, condition_types, measure_parameters, wafer_id_col, condition_col = transform_data(query_data, condition_data)
         
     except Exception as e:
         print(f"使用实际数据时出错: {e}")
@@ -559,16 +663,9 @@ def main():
         query_data, condition_data = create_sample_data(30)
         
         # 转换模拟数据
-        transformed_data, condition_types, measure_parameters = transform_data(query_data, condition_data)
+        transformed_data, condition_types, measure_parameters, wafer_id_col, condition_col = transform_data(query_data, condition_data)
     
-    # 查找列名
     # 查找条件列
-    condition_col = None
-    for col in transformed_data.columns:
-        if "condition" in col.lower():
-            condition_col = col
-            break
-    
     if not condition_col:
         # 查找可能的条件列（除了Wafer ID之外的第一列）
         for col in transformed_data.columns:
@@ -590,22 +687,50 @@ def main():
                 available_parameters.append(col)
     
     print(f"\n使用条件列: {condition_col}")
-    print(f"可用的电性量测参数: {available_parameters}")
+    print(f"发现的参数: {available_parameters}")
     
     # 确保有条件列和至少一个参数
     if not condition_col or not available_parameters:
         print("无法找到必要的列，请检查数据格式")
         return
     
-    # 创建单页PPT
+    # 1. 导出原始转换后的数据到Excel
+    excel_output = 'Wafer_Measurement_Data.xlsx'
+    export_to_excel(transformed_data, wafer_id_col, condition_col, excel_output)
+    
+    # 2. 移除各参数的异常值（创建数据副本以不影响原始数据）
+    cleaned_data = transformed_data.copy()
+    print("\n检测并移除异常值进行分析:")
+    for param in available_parameters:
+        param_cleaned = remove_outliers(
+            transformed_data, 
+            param, 
+            condition_col, 
+            condition_types, 
+            method='iqr', 
+            k=1.5
+        )
+        # 只更新当前参数列，保持其他列不变
+        cleaned_data[param] = param_cleaned[param]
+    
+    # 3. 创建PPT报告，使用清洗后的数据
     output_file = 'Wafer_Measurement_Analysis.pptx'
-    create_single_page_ppt(transformed_data, available_parameters, condition_col, condition_types, output_file)
+    create_single_page_ppt(
+        transformed_data, 
+        available_parameters, 
+        condition_col, 
+        condition_types, 
+        cleaned_data=cleaned_data,
+        output_file=output_file
+    )
     
     print("\n分析总结:")
     print("1. JMP风格Quantile Plot凹口向下是由于使用(i-0.375)/(n+0.25)概率公式")
     print("2. Python标准库默认使用i/(n+1)公式，产生凹口向上的曲线")
     print("3. 通过修改概率计算方法，成功模拟JMP风格的Quantile Plot")
-    print(f"4. 分析结果已保存至PowerPoint文件: {output_file}")
+    print("4. 自动检测并移除异常值用于分析，但原始数据保持不变")
+    print(f"5. 原始数据已导出至Excel文件: {excel_output}")
+    print(f"6. 分析结果已保存至PowerPoint文件: {output_file}")
 
 if __name__ == "__main__":
     main()
