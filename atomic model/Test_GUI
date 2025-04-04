@@ -733,9 +733,9 @@ class WaferAnalysisApp(QMainWindow):
         if len(group_values) >= 2:
             for group in group_values:
                 if 'base' in group.lower():
-                    baseline_group = group_values[0]  
+                    baseline_group = group
                 else:
-                    second_tool_group = group_values[1] 
+                    second_tool_group = group 
             
             if (baseline_group in stats_dict and second_tool_group in stats_dict and
                 not np.isnan(stats_dict[baseline_group]['Std Dev']) and
