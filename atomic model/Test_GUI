@@ -806,9 +806,6 @@ class WaferAnalysisApp(QMainWindow):
             return
             
         try:
-            # 获取当前组和参数
-            tab_widget = self.findChild(QTabWidget)
-            
             # 确定哪个组的线被选中
             lines = self.box_fig.axes[0].get_lines()
             line_index = -1
@@ -817,21 +814,27 @@ class WaferAnalysisApp(QMainWindow):
                     line_index = i
                     break
                     
-            if line_index < 0:
+            if line_index < 0 or line_index >= len(self.box_fig.axes[0].get_xticklabels()):
                 return
                 
-            # 获取组名
-            group = self.box_fig.axes[0].get_xticklabels()[line_index].get_text()
+            # 安全获取组名
+            tick_labels = self.box_fig.axes[0].get_xticklabels()
+            if line_index < len(tick_labels):
+                group = tick_labels[line_index].get_text()
+            else:
+                return
             
             # 获取选中点对应的wafer ID
             mask = self.transformed_data[self.condition_col] == group
             group_data = self.transformed_data.loc[mask, self.current_parameter].dropna()
             wafer_ids = self.transformed_data.loc[mask, self.wafer_id_col].values
             
-            if len(indices) > len(wafer_ids):
-                indices = indices[:len(wafer_ids)]
+            # 确保indices不超出范围
+            valid_indices = [i for i in indices if i < len(wafer_ids)]
+            if not valid_indices:
+                return
                 
-            selected_wafers = [wafer_ids[i] for i in indices]
+            selected_wafers = [wafer_ids[i] for i in valid_indices]
             
             # 更新排除点
             if self.current_parameter not in self.excluded_points:
