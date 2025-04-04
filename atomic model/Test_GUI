@@ -731,8 +731,11 @@ class WaferAnalysisApp(QMainWindow):
         
         # 计算K-shift (如果有两个或更多组)
         if len(group_values) >= 2:
-            baseline_group = group_values[0]  # 假设第一个为baseline
-            second_tool_group = group_values[1]  # 假设第二个为2nd tool
+            for group in group_values:
+                if 'base' in group.lower():
+                    baseline_group = group_values[0]  
+                else:
+                    second_tool_group = group_values[1] 
             
             if (baseline_group in stats_dict and second_tool_group in stats_dict and
                 not np.isnan(stats_dict[baseline_group]['Std Dev']) and
