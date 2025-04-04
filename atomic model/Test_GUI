@@ -1,8 +1,709 @@
-colors.append('lightblue')
+import sys
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import stats
+import io
+import traceback  # 用于详细错误信息
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
+from matplotlib.figure import Figure
+from matplotlib.widgets import LassoSelector, RectangleSelector
+from matplotlib.path import Path
+
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout,
+                           QWidget, QTableView, QHeaderView, QLabel, QComboBox, QFileDialog,
+                           QMessageBox, QSplitter, QTabWidget, QGroupBox)
+from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex
+from PyQt6.QtGui import QAction
+
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.enum.text import PP_ALIGN
+
+
+# 用于在QTableView中显示pandas DataFrame的自定义模型
+class PandasModel(QAbstractTableModel):
+    def __init__(self, data=None):
+        super().__init__()
+        self._data = pd.DataFrame() if data is None else data
+
+    def rowCount(self, parent=QModelIndex()):
+        return self._data.shape[0]
+
+    def columnCount(self, parent=QModelIndex()):
+        return self._data.shape[1]
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+
+        if role == Qt.ItemDataRole.DisplayRole:
+            value = self._data.iloc[index.row(), index.column()]
+            # 处理特殊值的显示
+            if pd.isna(value):
+                return ""
+            elif isinstance(value, (float, np.float64)):
+                if abs(value) < 0.0001:
+                    return f"{value:.4e}"
+                else:
+                    return f"{value:.4f}"
+            else:
+                return str(value)
+
+        return None
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if role == Qt.ItemDataRole.DisplayRole:
+            if orientation == Qt.Orientation.Horizontal:
+                return str(self._data.columns[section])
+            else:
+                return str(section + 1)
+        return None
+
+    def setData(self, data):
+        self._data = data
+        self.layoutChanged.emit()
+
+
+# 自定义的Figure Canvas，支持交互式选择
+class InteractiveFigureCanvas(FigureCanvas):
+    def __init__(self, fig, parent=None):
+        super().__init__(fig)
+        self.setParent(parent)
+        self.figure = fig
+        self.selected_points = []
+        self.wafer_ids = []
+        self.selector = None
+        self.callback = None
+
+    def enable_selection(self, mode='rectangle', callback=None):
+        """启用选择模式，可以是'rectangle'或'lasso'"""
+        if self.figure.axes:
+            ax = self.figure.axes[0]
+            self.callback = callback
+
+            if mode == 'rectangle':
+                self.selector = RectangleSelector(
+                    ax, self.on_select, useblit=True,
+                    button=[1], minspanx=5, minspany=5,
+                    spancoords='pixels', interactive=True
+                )
+            elif mode == 'lasso':
+                self.selector = LassoSelector(
+                    ax, self.on_select_lasso, useblit=True
+                )
+
+    def on_select(self, eclick, erelease):
+        """矩形选择回调"""
+        if not self.figure.axes:
+            return
+
+        ax = self.figure.axes[0]
+        x1, y1 = eclick.xdata, eclick.ydata
+        x2, y2 = erelease.xdata, erelease.ydata
+
+        # 获取所有点的坐标
+        for line in ax.get_lines():
+            xdata = line.get_xdata()
+            ydata = line.get_ydata()
+
+            # 找出在选择区域内的点
+            selected_indices = np.where(
+                (xdata >= min(x1, x2)) & (xdata <= max(x1, x2)) &
+                (ydata >= min(y1, y2)) & (ydata <= max(y1, y2))
+            )[0]
+
+            if len(selected_indices) > 0 and self.callback:
+                self.callback(selected_indices, line)
+
+    def on_select_lasso(self, verts):
+        """套索选择回调"""
+        if not self.figure.axes:
+            return
+
+        ax = self.figure.axes[0]
+        path = Path(verts)
+
+        # 获取所有点的坐标
+        for line in ax.get_lines():
+            xdata = line.get_xdata()
+            ydata = line.get_ydata()
+            coords = np.column_stack([xdata, ydata])
+
+            # 找出在套索区域内的点
+            selected_indices = np.where(path.contains_points(coords))[0]
+
+            if len(selected_indices) > 0 and self.callback:
+                self.callback(selected_indices, line)
+
+
+class WaferAnalysisApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("晶圆测量分析工具")
+        self.setGeometry(100, 100, 1280, 800)
+
+        # 数据存储
+        self.query_data = None
+        self.condition_data = None
+        self.transformed_data = None
+        self.wafer_id_col = None
+        self.condition_col = None
+        self.site_col = None
+        self.available_parameters = []
+        self.condition_types = []
+        self.current_parameter = None
+        self.excluded_points = {}  # 存储被排除的点 {parameter: [(condition, wafer_id), ...]}
+
+        # 设置菜单栏
+        self.create_menu_bar()
+
+        # 设置UI
+        self.setup_ui()
+
+    def create_menu_bar(self):
+        # 创建菜单栏
+        menu_bar = self.menuBar()
+
+        # 文件菜单
+        file_menu = menu_bar.addMenu("文件")
+
+        # 打开查询数据
+        open_query_action = QAction("打开查询数据", self)
+        open_query_action.triggered.connect(self.load_query_data)
+        file_menu.addAction(open_query_action)
+
+        # 打开条件数据
+        open_cond_action = QAction("打开条件数据", self)
+        open_cond_action.triggered.connect(self.load_condition_data)
+        file_menu.addAction(open_cond_action)
+
+        file_menu.addSeparator()
+
+        # 导出Excel
+        export_excel_action = QAction("导出Excel", self)
+        export_excel_action.triggered.connect(self.export_excel)
+        file_menu.addAction(export_excel_action)
+
+        # 创建PPT
+        create_ppt_action = QAction("创建PPT报告", self)
+        create_ppt_action.triggered.connect(self.create_ppt)
+        file_menu.addAction(create_ppt_action)
+
+        file_menu.addSeparator()
+
+        # 退出
+        exit_action = QAction("退出", self)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+        # 数据菜单
+        data_menu = menu_bar.addMenu("数据")
+
+        # 处理数据
+        process_action = QAction("处理数据", self)
+        process_action.triggered.connect(self.process_data)
+        data_menu.addAction(process_action)
+
+        # 清除排除点
+        clear_exclude_action = QAction("清除排除点", self)
+        clear_exclude_action.triggered.connect(self.clear_excluded_points)
+        data_menu.addAction(clear_exclude_action)
+
+        # 帮助菜单
+        help_menu = menu_bar.addMenu("帮助")
+
+        # 关于
+        about_action = QAction("关于", self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
+
+    def setup_ui(self):
+        # 主布局
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+
+        # 顶部控制区域
+        top_controls = QWidget()
+        top_layout = QHBoxLayout(top_controls)
+
+        # 文件上传区域
+        file_group = QGroupBox("数据文件")
+        file_layout = QHBoxLayout(file_group)
+
+        self.query_btn = QPushButton("上传查询数据")
+        self.condition_btn = QPushButton("上传条件数据")
+        self.process_btn = QPushButton("处理数据")
+
+        self.query_btn.clicked.connect(self.load_query_data)
+        self.condition_btn.clicked.connect(self.load_condition_data)
+        self.process_btn.clicked.connect(self.process_data)
+
+        file_layout.addWidget(self.query_btn)
+        file_layout.addWidget(self.condition_btn)
+        file_layout.addWidget(self.process_btn)
+
+        # 参数选择区域
+        param_group = QGroupBox("参数选择")
+        param_layout = QHBoxLayout(param_group)
+
+        param_label = QLabel("选择参数:")
+        self.param_combo = QComboBox()
+        self.param_combo.currentIndexChanged.connect(self.on_parameter_changed)
+        
+        param_layout.addWidget(param_label)
+        param_layout.addWidget(self.param_combo)
+
+        # 导出区域
+        export_group = QGroupBox("导出")
+        export_layout = QHBoxLayout(export_group)
+
+        self.export_excel_btn = QPushButton("导出Excel")
+        self.export_ppt_btn = QPushButton("创建PPT")
+        
+        self.export_excel_btn.clicked.connect(self.export_excel)
+        self.export_ppt_btn.clicked.connect(self.create_ppt)
+        
+        export_layout.addWidget(self.export_excel_btn)
+        export_layout.addWidget(self.export_ppt_btn)
+
+        # 添加到顶部布局
+        top_layout.addWidget(file_group)
+        top_layout.addWidget(param_group)
+        top_layout.addWidget(export_group)
+
+        # 主分割窗口
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        
+        # 左侧数据表格
+        table_widget = QWidget()
+        table_layout = QVBoxLayout(table_widget)
+        table_label = QLabel("数据表格")
+        self.table_view = QTableView()
+        self.table_model = PandasModel()
+        self.table_view.setModel(self.table_model)
+        
+        table_layout.addWidget(table_label)
+        table_layout.addWidget(self.table_view)
+        
+        # 右侧图表区域
+        plot_widget = QWidget()
+        plot_layout = QVBoxLayout(plot_widget)
+        
+        # 创建选项卡窗口用于Box Plot和QQ Plot
+        tab_widget = QTabWidget()
+        
+        # Box Plot 选项卡
+        self.box_tab = QWidget()
+        box_layout = QVBoxLayout(self.box_tab)
+        
+        self.box_fig = Figure(figsize=(5, 4), dpi=100)
+        self.box_canvas = InteractiveFigureCanvas(self.box_fig)
+        self.box_toolbar = NavigationToolbar(self.box_canvas, self.box_tab)
+        
+        box_layout.addWidget(self.box_toolbar)
+        box_layout.addWidget(self.box_canvas)
+        
+        # QQ Plot 选项卡
+        self.qq_tab = QWidget()
+        qq_layout = QVBoxLayout(self.qq_tab)
+        
+        self.qq_fig = Figure(figsize=(5, 4), dpi=100)
+        self.qq_canvas = InteractiveFigureCanvas(self.qq_fig)
+        self.qq_toolbar = NavigationToolbar(self.qq_canvas, self.qq_tab)
+        
+        qq_layout.addWidget(self.qq_toolbar)
+        qq_layout.addWidget(self.qq_canvas)
+        
+        # 添加选项卡
+        tab_widget.addTab(self.box_tab, "箱形图")
+        tab_widget.addTab(self.qq_tab, "Q-Q图")
+        
+        plot_layout.addWidget(tab_widget)
+        
+        # 右下方控制区域
+        plot_controls = QWidget()
+        plot_controls_layout = QHBoxLayout(plot_controls)
+        
+        self.rect_select_btn = QPushButton("矩形选择")
+        self.lasso_select_btn = QPushButton("套索选择")
+        self.clear_select_btn = QPushButton("清除选择")
+        
+        self.rect_select_btn.clicked.connect(lambda: self.enable_selection_mode('rectangle'))
+        self.lasso_select_btn.clicked.connect(lambda: self.enable_selection_mode('lasso'))
+        self.clear_select_btn.clicked.connect(self.clear_selection)
+        
+        plot_controls_layout.addWidget(self.rect_select_btn)
+        plot_controls_layout.addWidget(self.lasso_select_btn)
+        plot_controls_layout.addWidget(self.clear_select_btn)
+        
+        plot_layout.addWidget(plot_controls)
+        
+        # 添加到分割窗口
+        splitter.addWidget(table_widget)
+        splitter.addWidget(plot_widget)
+        splitter.setSizes([400, 800])  # 设置初始大小比例
+        
+        # 添加到主布局
+        main_layout.addWidget(top_controls)
+        main_layout.addWidget(splitter, 1)  # 1表示拉伸因子
+
+        # 初始状态设置
+        self.export_excel_btn.setEnabled(False)
+        self.export_ppt_btn.setEnabled(False)
+        self.param_combo.setEnabled(False)
+        self.rect_select_btn.setEnabled(False)
+        self.lasso_select_btn.setEnabled(False)
+        self.clear_select_btn.setEnabled(False)
+
+    def load_query_data(self):
+        """加载查询数据文件"""
+        file_name, _ = QFileDialog.getOpenFileName(
+            self, "选择查询数据文件", "", "Excel Files (*.xlsx *.xls);;CSV Files (*.csv);;All Files (*)"
+        )
+        
+        if file_name:
+            try:
+                if file_name.endswith('.csv'):
+                    self.query_data = pd.read_csv(file_name)
+                else:
+                    self.query_data = pd.read_excel(file_name)
+                
+                QMessageBox.information(self, "成功", f"已加载查询数据: {file_name}")
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"加载数据时出错: {str(e)}")
+
+    def load_condition_data(self):
+        """加载条件数据文件"""
+        file_name, _ = QFileDialog.getOpenFileName(
+            self, "选择条件数据文件", "", "Excel Files (*.xlsx *.xls);;CSV Files (*.csv);;All Files (*)"
+        )
+        
+        if file_name:
+            try:
+                if file_name.endswith('.csv'):
+                    self.condition_data = pd.read_csv(file_name)
+                else:
+                    self.condition_data = pd.read_excel(file_name)
+                
+                QMessageBox.information(self, "成功", f"已加载条件数据: {file_name}")
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"加载数据时出错: {str(e)}")
+
+    def process_data(self):
+        """处理数据"""
+        if self.query_data is None or self.condition_data is None:
+            if self.query_data is None and self.condition_data is None:
+                # 如果两个数据都未加载，创建模拟数据
+                self.create_sample_data()
+            else:
+                QMessageBox.warning(self, "警告", "请先加载查询数据和条件数据")
+                return
+        
+        try:
+            # 处理数据
+            transformed_data, condition_types, measure_parameters, wafer_id_col, condition_col, site_col = self.transform_data()
+            
+            if transformed_data is not None:
+                self.transformed_data = transformed_data
+                self.condition_types = condition_types
+                self.wafer_id_col = wafer_id_col
+                self.condition_col = condition_col
+                self.site_col = site_col
+                
+                # 清除排除点
+                self.excluded_points = {}
+                
+                # 更新可用参数
+                self.available_parameters = []
+                for param in measure_parameters:
+                    if param in transformed_data.columns:
+                        self.available_parameters.append(param)
+                
+                if len(self.available_parameters) == 0:
+                    # 如果没有找到可用参数，尝试使用非ID和非条件列
+                    for col in transformed_data.columns:
+                        if "wafer" not in col.lower() and col != condition_col and col != site_col:
+                            self.available_parameters.append(col)
+                
+                # 更新UI
+                self.update_parameter_combo()
+                self.update_table_view()
+                
+                # 启用功能按钮
+                self.export_excel_btn.setEnabled(True)
+                self.export_ppt_btn.setEnabled(True)
+                self.param_combo.setEnabled(True)
+                self.rect_select_btn.setEnabled(True)
+                self.lasso_select_btn.setEnabled(True)
+                self.clear_select_btn.setEnabled(True)
+                
+                QMessageBox.information(self, "成功", "数据处理完成")
+            else:
+                QMessageBox.warning(self, "警告", "数据处理失败")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"处理数据时出错: {str(e)}\n{traceback.format_exc()}")
+
+    def transform_data(self):
+        """转换数据，合并查询数据和条件数据，保留Site ID信息"""
+        try:
+            # 查找查询数据中的Wafer ID列
+            wafer_id_query = "Wafer ID" if "Wafer ID" in self.query_data.columns else "WaferID"
+            if wafer_id_query not in self.query_data.columns:
+                # 寻找可能包含wafer id的列
+                for col in self.query_data.columns:
+                    if "wafer" in col.lower():
+                        wafer_id_query = col
+                        break
+            
+            # 查找条件数据中的WaferID列
+            wafer_id_condition = "WaferID" if "WaferID" in self.condition_data.columns else "Wafer ID"
+            if wafer_id_condition not in self.condition_data.columns:
+                # 寻找可能包含wafer id的列
+                for col in self.condition_data.columns:
+                    if "wafer" in col.lower():
+                        wafer_id_condition = col
+                        break
+            
+            # 查找参数名列、值列和Site ID列
+            parameter_col = None
+            value_col = None
+            site_col = None
+            
+            for col in self.query_data.columns:
+                if "Parameter Name" in col or "name" in col.lower():
+                    parameter_col = col
+                elif "value" in col.lower() or "site value" in col.lower():
+                    value_col = col
+                elif "site" in col.lower() and "value" not in col.lower():
+                    site_col = col
+            
+            # 查找条件列
+            condition_col = None
+            for col in self.condition_data.columns:
+                if "condition" in col.lower():
+                    condition_col = col
+                    break
+            
+            # 获取条件类型（通常是Baseline和2nd tool）
+            if condition_col and condition_col in self.condition_data.columns:
+                condition_types = self.condition_data[condition_col].unique()
+            else:
+                condition_types = ["Baseline", "2nd tool"]
+            
+            # 获取参数列表
+            if parameter_col and parameter_col in self.query_data.columns:
+                measure_parameters = self.query_data[parameter_col].unique()
+            else:
+                measure_parameters = ["Con_M3LA", "Con_M3LB", "Rc_V2v", "LK_M3LA", "LK_M3LB"]
+            
+            # 合并数据
+            merged_data = pd.merge(
+                self.query_data,
+                self.condition_data,
+                left_on=wafer_id_query,
+                right_on=wafer_id_condition,
+                how='left'
+            )
+            
+            # 使用Site ID创建透视表
+            try:
+                # 准备包含Site ID的数据转换
+                if site_col:
+                    # 使用Site ID进行透视
+                    pivot_data = merged_data.pivot_table(
+                        index=[wafer_id_query, site_col, condition_col],
+                        columns=parameter_col,
+                        values=value_col,
+                        aggfunc='first'  # 不进行聚合，保留原始值
+                    ).reset_index()
+                else:
+                    # 如果找不到Site ID列，创建一个虚拟的
+                    merged_data['Site_ID'] = merged_data.groupby([wafer_id_query, parameter_col]).cumcount() + 1
+                    site_col = 'Site_ID'
+                    
+                    pivot_data = merged_data.pivot_table(
+                        index=[wafer_id_query, site_col, condition_col],
+                        columns=parameter_col,
+                        values=value_col,
+                        aggfunc='first'
+                    ).reset_index()
+                
+                print(f"数据透视表形状: {pivot_data.shape}")
+                
+                return pivot_data, condition_types, measure_parameters, wafer_id_query, condition_col, site_col
+                
+            except Exception as e:
+                print(f"创建数据透视表时出错: {e}")
+                
+                # 备用方法 - 不使用透视表，直接重塑数据
+                transformed_data = merged_data[[wafer_id_query, condition_col]].drop_duplicates()
+                
+                if site_col:
+                    site_data = merged_data[[wafer_id_query, site_col]].drop_duplicates()
+                    transformed_data = pd.merge(transformed_data, site_data, on=wafer_id_query, how='left')
+                else:
+                    # 创建虚拟Site ID
+                    merged_data['Site_ID'] = merged_data.groupby(wafer_id_query).cumcount() + 1
+                    site_col = 'Site_ID'
+                    site_data = merged_data[[wafer_id_query, site_col]].drop_duplicates()
+                    transformed_data = pd.merge(transformed_data, site_data, on=wafer_id_query, how='left')
+                
+                # 为每个参数创建列
+                for param in measure_parameters:
+                    param_data = merged_data[merged_data[parameter_col] == param]
+                    param_data = param_data[[wafer_id_query, site_col, value_col]].rename(columns={value_col: param})
+                    transformed_data = pd.merge(transformed_data, param_data, on=[wafer_id_query, site_col], how='left')
+                
+                print(f"备用转换数据形状: {transformed_data.shape}")
+                
+                return transformed_data, condition_types, measure_parameters, wafer_id_query, condition_col, site_col
+        
+        except Exception as e:
+            print(f"转换数据时出错: {e}")
+            return None, None, None, None, None, None
+
+    def create_sample_data(self):
+        """创建模拟数据集，包含Site ID信息"""
+        n_wafers = 30
+        
+        # 创建wafer IDs
+        wafer_ids = [f'Wafer_{i:03d}' for i in range(1, n_wafers+1)]
+        
+        # 条件类型
+        condition_types = ['Baseline', '2nd tool']
+        
+        # 创建condition_list数据
+        condition_data = pd.DataFrame({
+            'WaferID': wafer_ids,
+            'Condition': np.random.choice(condition_types, size=n_wafers)
+        })
+        
+        # 创建量测数据
+        param_names = ['Con_M3LA', 'Con_M3LB', 'Rc_V2v', 'LK_M3LA', 'LK_M3LB']
+        
+        rows = []
+        for wafer_id in wafer_ids:
+            for param in param_names:
+                # 为每个wafer和每个参数创建多个site测量
+                n_sites = np.random.randint(1, 5)
+                for site in range(1, n_sites+1):
+                    # 随机生成0-9之间的值，添加少量异常值
+                    value = np.random.uniform(0, 9)
+                    
+                    # 5%的概率生成异常值
+                    if np.random.random() < 0.05:
+                        value = value * (3 + np.random.random() * 2)  # 3-5倍的异常值
+                    
+                    rows.append({
+                        'Wafer ID': wafer_id,
+                        'Parameter Name': param,
+                        'Site': f'Site_{site}',
+                        'Site Value': value
+                    })
+        
+        query_data = pd.DataFrame(rows)
+        
+        self.query_data = query_data
+        self.condition_data = condition_data
+        
+        QMessageBox.information(self, "提示", "已创建模拟数据")
+
+    def update_parameter_combo(self):
+        """更新参数下拉选择框"""
+        if not self.available_parameters:
+            return
+        
+        # 清除当前选项
+        self.param_combo.clear()
+        
+        # 添加参数选项
+        for param in self.available_parameters:
+            self.param_combo.addItem(param)
+        
+        # 默认选择第一个参数
+        if self.param_combo.count() > 0:
+            self.current_parameter = self.available_parameters[0]
+            self.update_plot()
+
+    def update_table_view(self):
+        """更新数据表格视图"""
+        if self.transformed_data is not None:
+            self.table_model.setData(self.transformed_data)
+            
+            # 自动调整列宽
+            header = self.table_view.horizontalHeader()
+            for i in range(self.table_model.columnCount()):
+                header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+
+    def on_parameter_changed(self, index):
+        """当参数选择改变时调用"""
+        if index >= 0 and index < len(self.available_parameters):
+            self.current_parameter = self.available_parameters[index]
+            self.update_plot()
+
+    def update_plot(self):
+        """更新图表"""
+        if self.transformed_data is None or self.current_parameter is None:
+            return
+        
+        # 更新箱形图
+        self.update_box_plot()
+        
+        # 更新QQ图
+        self.update_qq_plot()
+
+    def update_box_plot(self):
+        """更新箱形图"""
+        # 清除当前图表
+        self.box_fig.clear()
+        ax = self.box_fig.add_subplot(111)
+        
+        # 为每个Wafer ID创建平均值数据用于箱线图
+        wafer_avg_data = self.transformed_data.groupby([self.wafer_id_col, self.condition_col])[self.current_parameter].mean().reset_index()
+        
+        # 确保Baseline总是第一个，2nd tool总是第二个
+        ordered_groups = []
+        for expected_group in ["Baseline", "2nd tool"]:
+            if expected_group in self.condition_types:
+                ordered_groups.append(expected_group)
+        
+        # 如果有其他不在预期内的组，也添加进来
+        for group in self.condition_types:
+            if group not in ordered_groups:
+                ordered_groups.append(group)
+        
+        # 准备数据
+        box_data = []
+        labels = []
+        
+        for group in ordered_groups:
+            # 获取当前组和参数的Wafer平均数据
+            mask = wafer_avg_data[self.condition_col] == group
+            group_data = wafer_avg_data.loc[mask, self.current_parameter].dropna()
+            
+            if len(group_data) > 0:
+                box_data.append(group_data)
+                labels.append(group)
+        
+        if not box_data:
+            ax.text(0.5, 0.5, f"无数据可用于 {self.current_parameter}", 
+                   ha='center', va='center', transform=ax.transAxes)
+            self.box_canvas.draw()
+            return
+        
+        # 创建箱线图
+        colors = []
+        for label in labels:
+            if label == "Baseline":
+                colors.append('lightblue')
             elif label == "2nd tool":
                 colors.append('lightgreen')
             else:
-                colors.append('lightgray')  # 默认颜色
+                colors.append('lightgray')
+                colors.append('lightblue')
         
         # 绘制箱线图
         boxplot = ax.boxplot(box_data, patch_artist=True, labels=labels)
@@ -861,705 +1562,4 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = WaferAnalysisApp()
     window.show()
-    sys.exit(app.exec())import sys
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy import stats
-import io
-import traceback  # 用于详细错误信息
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
-from matplotlib.figure import Figure
-from matplotlib.widgets import LassoSelector, RectangleSelector
-from matplotlib.path import Path
-
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout,
-                           QWidget, QTableView, QHeaderView, QLabel, QComboBox, QFileDialog,
-                           QMessageBox, QSplitter, QTabWidget, QGroupBox)
-from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex
-from PyQt6.QtGui import QAction
-
-from pptx import Presentation
-from pptx.util import Inches, Pt
-from pptx.enum.text import PP_ALIGN
-
-
-# 用于在QTableView中显示pandas DataFrame的自定义模型
-class PandasModel(QAbstractTableModel):
-    def __init__(self, data=None):
-        super().__init__()
-        self._data = pd.DataFrame() if data is None else data
-
-    def rowCount(self, parent=QModelIndex()):
-        return self._data.shape[0]
-
-    def columnCount(self, parent=QModelIndex()):
-        return self._data.shape[1]
-
-    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid():
-            return None
-
-        if role == Qt.ItemDataRole.DisplayRole:
-            value = self._data.iloc[index.row(), index.column()]
-            # 处理特殊值的显示
-            if pd.isna(value):
-                return ""
-            elif isinstance(value, (float, np.float64)):
-                if abs(value) < 0.0001:
-                    return f"{value:.4e}"
-                else:
-                    return f"{value:.4f}"
-            else:
-                return str(value)
-
-        return None
-
-    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
-        if role == Qt.ItemDataRole.DisplayRole:
-            if orientation == Qt.Orientation.Horizontal:
-                return str(self._data.columns[section])
-            else:
-                return str(section + 1)
-        return None
-
-    def setData(self, data):
-        self._data = data
-        self.layoutChanged.emit()
-
-
-# 自定义的Figure Canvas，支持交互式选择
-class InteractiveFigureCanvas(FigureCanvas):
-    def __init__(self, fig, parent=None):
-        super().__init__(fig)
-        self.setParent(parent)
-        self.figure = fig
-        self.selected_points = []
-        self.wafer_ids = []
-        self.selector = None
-        self.callback = None
-
-    def enable_selection(self, mode='rectangle', callback=None):
-        """启用选择模式，可以是'rectangle'或'lasso'"""
-        if self.figure.axes:
-            ax = self.figure.axes[0]
-            self.callback = callback
-
-            if mode == 'rectangle':
-                self.selector = RectangleSelector(
-                    ax, self.on_select, useblit=True,
-                    button=[1], minspanx=5, minspany=5,
-                    spancoords='pixels', interactive=True
-                )
-            elif mode == 'lasso':
-                self.selector = LassoSelector(
-                    ax, self.on_select_lasso, useblit=True
-                )
-
-    def on_select(self, eclick, erelease):
-        """矩形选择回调"""
-        if not self.figure.axes:
-            return
-
-        ax = self.figure.axes[0]
-        x1, y1 = eclick.xdata, eclick.ydata
-        x2, y2 = erelease.xdata, erelease.ydata
-
-        # 获取所有点的坐标
-        for line in ax.get_lines():
-            xdata = line.get_xdata()
-            ydata = line.get_ydata()
-
-            # 找出在选择区域内的点
-            selected_indices = np.where(
-                (xdata >= min(x1, x2)) & (xdata <= max(x1, x2)) &
-                (ydata >= min(y1, y2)) & (ydata <= max(y1, y2))
-            )[0]
-
-            if len(selected_indices) > 0 and self.callback:
-                self.callback(selected_indices, line)
-
-    def on_select_lasso(self, verts):
-        """套索选择回调"""
-        if not self.figure.axes:
-            return
-
-        ax = self.figure.axes[0]
-        path = Path(verts)
-
-        # 获取所有点的坐标
-        for line in ax.get_lines():
-            xdata = line.get_xdata()
-            ydata = line.get_ydata()
-            coords = np.column_stack([xdata, ydata])
-
-            # 找出在套索区域内的点
-            selected_indices = np.where(path.contains_points(coords))[0]
-
-            if len(selected_indices) > 0 and self.callback:
-                self.callback(selected_indices, line)
-
-
-class WaferAnalysisApp(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("晶圆测量分析工具")
-        self.setGeometry(100, 100, 1280, 800)
-
-        # 数据存储
-        self.query_data = None
-        self.condition_data = None
-        self.transformed_data = None
-        self.wafer_id_col = None
-        self.condition_col = None
-        self.site_col = None
-        self.available_parameters = []
-        self.condition_types = []
-        self.current_parameter = None
-        self.excluded_points = {}  # 存储被排除的点 {parameter: [(condition, wafer_id), ...]}
-
-        # 设置菜单栏
-        self.create_menu_bar()
-
-        # 设置UI
-        self.setup_ui()
-
-    def create_menu_bar(self):
-        # 创建菜单栏
-        menu_bar = self.menuBar()
-
-        # 文件菜单
-        file_menu = menu_bar.addMenu("文件")
-
-        # 打开查询数据
-        open_query_action = QAction("打开查询数据", self)
-        open_query_action.triggered.connect(self.load_query_data)
-        file_menu.addAction(open_query_action)
-
-        # 打开条件数据
-        open_cond_action = QAction("打开条件数据", self)
-        open_cond_action.triggered.connect(self.load_condition_data)
-        file_menu.addAction(open_cond_action)
-
-        file_menu.addSeparator()
-
-        # 导出Excel
-        export_excel_action = QAction("导出Excel", self)
-        export_excel_action.triggered.connect(self.export_excel)
-        file_menu.addAction(export_excel_action)
-
-        # 创建PPT
-        create_ppt_action = QAction("创建PPT报告", self)
-        create_ppt_action.triggered.connect(self.create_ppt)
-        file_menu.addAction(create_ppt_action)
-
-        file_menu.addSeparator()
-
-        # 退出
-        exit_action = QAction("退出", self)
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
-
-        # 数据菜单
-        data_menu = menu_bar.addMenu("数据")
-
-        # 处理数据
-        process_action = QAction("处理数据", self)
-        process_action.triggered.connect(self.process_data)
-        data_menu.addAction(process_action)
-
-        # 清除排除点
-        clear_exclude_action = QAction("清除排除点", self)
-        clear_exclude_action.triggered.connect(self.clear_excluded_points)
-        data_menu.addAction(clear_exclude_action)
-
-        # 帮助菜单
-        help_menu = menu_bar.addMenu("帮助")
-
-        # 关于
-        about_action = QAction("关于", self)
-        about_action.triggered.connect(self.show_about)
-        help_menu.addAction(about_action)
-
-    def setup_ui(self):
-        # 主布局
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-
-        # 顶部控制区域
-        top_controls = QWidget()
-        top_layout = QHBoxLayout(top_controls)
-
-        # 文件上传区域
-        file_group = QGroupBox("数据文件")
-        file_layout = QHBoxLayout(file_group)
-
-        self.query_btn = QPushButton("上传查询数据")
-        self.condition_btn = QPushButton("上传条件数据")
-        self.process_btn = QPushButton("处理数据")
-
-        self.query_btn.clicked.connect(self.load_query_data)
-        self.condition_btn.clicked.connect(self.load_condition_data)
-        self.process_btn.clicked.connect(self.process_data)
-
-        file_layout.addWidget(self.query_btn)
-        file_layout.addWidget(self.condition_btn)
-        file_layout.addWidget(self.process_btn)
-
-        # 参数选择区域
-        param_group = QGroupBox("参数选择")
-        param_layout = QHBoxLayout(param_group)
-
-        param_label = QLabel("选择参数:")
-        self.param_combo = QComboBox()
-        self.param_combo.currentIndexChanged.connect(self.on_parameter_changed)
-        
-        param_layout.addWidget(param_label)
-        param_layout.addWidget(self.param_combo)
-
-        # 导出区域
-        export_group = QGroupBox("导出")
-        export_layout = QHBoxLayout(export_group)
-
-        self.export_excel_btn = QPushButton("导出Excel")
-        self.export_ppt_btn = QPushButton("创建PPT")
-        
-        self.export_excel_btn.clicked.connect(self.export_excel)
-        self.export_ppt_btn.clicked.connect(self.create_ppt)
-        
-        export_layout.addWidget(self.export_excel_btn)
-        export_layout.addWidget(self.export_ppt_btn)
-
-        # 添加到顶部布局
-        top_layout.addWidget(file_group)
-        top_layout.addWidget(param_group)
-        top_layout.addWidget(export_group)
-
-        # 主分割窗口
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        
-        # 左侧数据表格
-        table_widget = QWidget()
-        table_layout = QVBoxLayout(table_widget)
-        table_label = QLabel("数据表格")
-        self.table_view = QTableView()
-        self.table_model = PandasModel()
-        self.table_view.setModel(self.table_model)
-        
-        table_layout.addWidget(table_label)
-        table_layout.addWidget(self.table_view)
-        
-        # 右侧图表区域
-        plot_widget = QWidget()
-        plot_layout = QVBoxLayout(plot_widget)
-        
-        # 创建选项卡窗口用于Box Plot和QQ Plot
-        tab_widget = QTabWidget()
-        
-        # Box Plot 选项卡
-        self.box_tab = QWidget()
-        box_layout = QVBoxLayout(self.box_tab)
-        
-        self.box_fig = Figure(figsize=(5, 4), dpi=100)
-        self.box_canvas = InteractiveFigureCanvas(self.box_fig)
-        self.box_toolbar = NavigationToolbar(self.box_canvas, self.box_tab)
-        
-        box_layout.addWidget(self.box_toolbar)
-        box_layout.addWidget(self.box_canvas)
-        
-        # QQ Plot 选项卡
-        self.qq_tab = QWidget()
-        qq_layout = QVBoxLayout(self.qq_tab)
-        
-        self.qq_fig = Figure(figsize=(5, 4), dpi=100)
-        self.qq_canvas = InteractiveFigureCanvas(self.qq_fig)
-        self.qq_toolbar = NavigationToolbar(self.qq_canvas, self.qq_tab)
-        
-        qq_layout.addWidget(self.qq_toolbar)
-        qq_layout.addWidget(self.qq_canvas)
-        
-        # 添加选项卡
-        tab_widget.addTab(self.box_tab, "箱形图")
-        tab_widget.addTab(self.qq_tab, "Q-Q图")
-        
-        plot_layout.addWidget(tab_widget)
-        
-        # 右下方控制区域
-        plot_controls = QWidget()
-        plot_controls_layout = QHBoxLayout(plot_controls)
-        
-        self.rect_select_btn = QPushButton("矩形选择")
-        self.lasso_select_btn = QPushButton("套索选择")
-        self.clear_select_btn = QPushButton("清除选择")
-        
-        self.rect_select_btn.clicked.connect(lambda: self.enable_selection_mode('rectangle'))
-        self.lasso_select_btn.clicked.connect(lambda: self.enable_selection_mode('lasso'))
-        self.clear_select_btn.clicked.connect(self.clear_selection)
-        
-        plot_controls_layout.addWidget(self.rect_select_btn)
-        plot_controls_layout.addWidget(self.lasso_select_btn)
-        plot_controls_layout.addWidget(self.clear_select_btn)
-        
-        plot_layout.addWidget(plot_controls)
-        
-        # 添加到分割窗口
-        splitter.addWidget(table_widget)
-        splitter.addWidget(plot_widget)
-        splitter.setSizes([400, 800])  # 设置初始大小比例
-        
-        # 添加到主布局
-        main_layout.addWidget(top_controls)
-        main_layout.addWidget(splitter, 1)  # 1表示拉伸因子
-
-        # 初始状态设置
-        self.export_excel_btn.setEnabled(False)
-        self.export_ppt_btn.setEnabled(False)
-        self.param_combo.setEnabled(False)
-        self.rect_select_btn.setEnabled(False)
-        self.lasso_select_btn.setEnabled(False)
-        self.clear_select_btn.setEnabled(False)
-
-    def load_query_data(self):
-        """加载查询数据文件"""
-        file_name, _ = QFileDialog.getOpenFileName(
-            self, "选择查询数据文件", "", "Excel Files (*.xlsx *.xls);;CSV Files (*.csv);;All Files (*)"
-        )
-        
-        if file_name:
-            try:
-                if file_name.endswith('.csv'):
-                    self.query_data = pd.read_csv(file_name)
-                else:
-                    self.query_data = pd.read_excel(file_name)
-                
-                QMessageBox.information(self, "成功", f"已加载查询数据: {file_name}")
-            except Exception as e:
-                QMessageBox.critical(self, "错误", f"加载数据时出错: {str(e)}")
-
-    def load_condition_data(self):
-        """加载条件数据文件"""
-        file_name, _ = QFileDialog.getOpenFileName(
-            self, "选择条件数据文件", "", "Excel Files (*.xlsx *.xls);;CSV Files (*.csv);;All Files (*)"
-        )
-        
-        if file_name:
-            try:
-                if file_name.endswith('.csv'):
-                    self.condition_data = pd.read_csv(file_name)
-                else:
-                    self.condition_data = pd.read_excel(file_name)
-                
-                QMessageBox.information(self, "成功", f"已加载条件数据: {file_name}")
-            except Exception as e:
-                QMessageBox.critical(self, "错误", f"加载数据时出错: {str(e)}")
-
-    def process_data(self):
-        """处理数据"""
-        if self.query_data is None or self.condition_data is None:
-            if self.query_data is None and self.condition_data is None:
-                # 如果两个数据都未加载，创建模拟数据
-                self.create_sample_data()
-            else:
-                QMessageBox.warning(self, "警告", "请先加载查询数据和条件数据")
-                return
-        
-        try:
-            # 处理数据
-            transformed_data, condition_types, measure_parameters, wafer_id_col, condition_col, site_col = self.transform_data()
-            
-            if transformed_data is not None:
-                self.transformed_data = transformed_data
-                self.condition_types = condition_types
-                self.wafer_id_col = wafer_id_col
-                self.condition_col = condition_col
-                self.site_col = site_col
-                
-                # 清除排除点
-                self.excluded_points = {}
-                
-                # 更新可用参数
-                self.available_parameters = []
-                for param in measure_parameters:
-                    if param in transformed_data.columns:
-                        self.available_parameters.append(param)
-                
-                if len(self.available_parameters) == 0:
-                    # 如果没有找到可用参数，尝试使用非ID和非条件列
-                    for col in transformed_data.columns:
-                        if "wafer" not in col.lower() and col != condition_col and col != site_col:
-                            self.available_parameters.append(col)
-                
-                # 更新UI
-                self.update_parameter_combo()
-                self.update_table_view()
-                
-                # 启用功能按钮
-                self.export_excel_btn.setEnabled(True)
-                self.export_ppt_btn.setEnabled(True)
-                self.param_combo.setEnabled(True)
-                self.rect_select_btn.setEnabled(True)
-                self.lasso_select_btn.setEnabled(True)
-                self.clear_select_btn.setEnabled(True)
-                
-                QMessageBox.information(self, "成功", "数据处理完成")
-            else:
-                QMessageBox.warning(self, "警告", "数据处理失败")
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"处理数据时出错: {str(e)}\n{traceback.format_exc()}")
-
-    def transform_data(self):
-        """转换数据，合并查询数据和条件数据，保留Site ID信息"""
-        try:
-            # 查找查询数据中的Wafer ID列
-            wafer_id_query = "Wafer ID" if "Wafer ID" in self.query_data.columns else "WaferID"
-            if wafer_id_query not in self.query_data.columns:
-                # 寻找可能包含wafer id的列
-                for col in self.query_data.columns:
-                    if "wafer" in col.lower():
-                        wafer_id_query = col
-                        break
-            
-            # 查找条件数据中的WaferID列
-            wafer_id_condition = "WaferID" if "WaferID" in self.condition_data.columns else "Wafer ID"
-            if wafer_id_condition not in self.condition_data.columns:
-                # 寻找可能包含wafer id的列
-                for col in self.condition_data.columns:
-                    if "wafer" in col.lower():
-                        wafer_id_condition = col
-                        break
-            
-            # 查找参数名列、值列和Site ID列
-            parameter_col = None
-            value_col = None
-            site_col = None
-            
-            for col in self.query_data.columns:
-                if "Parameter Name" in col or "name" in col.lower():
-                    parameter_col = col
-                elif "value" in col.lower() or "site value" in col.lower():
-                    value_col = col
-                elif "site" in col.lower() and "value" not in col.lower():
-                    site_col = col
-            
-            # 查找条件列
-            condition_col = None
-            for col in self.condition_data.columns:
-                if "condition" in col.lower():
-                    condition_col = col
-                    break
-            
-            # 获取条件类型（通常是Baseline和2nd tool）
-            if condition_col and condition_col in self.condition_data.columns:
-                condition_types = self.condition_data[condition_col].unique()
-            else:
-                condition_types = ["Baseline", "2nd tool"]
-            
-            # 获取参数列表
-            if parameter_col and parameter_col in self.query_data.columns:
-                measure_parameters = self.query_data[parameter_col].unique()
-            else:
-                measure_parameters = ["Con_M3LA", "Con_M3LB", "Rc_V2v", "LK_M3LA", "LK_M3LB"]
-            
-            # 合并数据
-            merged_data = pd.merge(
-                self.query_data,
-                self.condition_data,
-                left_on=wafer_id_query,
-                right_on=wafer_id_condition,
-                how='left'
-            )
-            
-            # 使用Site ID创建透视表
-            try:
-                # 准备包含Site ID的数据转换
-                if site_col:
-                    # 使用Site ID进行透视
-                    pivot_data = merged_data.pivot_table(
-                        index=[wafer_id_query, site_col, condition_col],
-                        columns=parameter_col,
-                        values=value_col,
-                        aggfunc='first'  # 不进行聚合，保留原始值
-                    ).reset_index()
-                else:
-                    # 如果找不到Site ID列，创建一个虚拟的
-                    merged_data['Site_ID'] = merged_data.groupby([wafer_id_query, parameter_col]).cumcount() + 1
-                    site_col = 'Site_ID'
-                    
-                    pivot_data = merged_data.pivot_table(
-                        index=[wafer_id_query, site_col, condition_col],
-                        columns=parameter_col,
-                        values=value_col,
-                        aggfunc='first'
-                    ).reset_index()
-                
-                print(f"数据透视表形状: {pivot_data.shape}")
-                
-                return pivot_data, condition_types, measure_parameters, wafer_id_query, condition_col, site_col
-                
-            except Exception as e:
-                print(f"创建数据透视表时出错: {e}")
-                
-                # 备用方法 - 不使用透视表，直接重塑数据
-                transformed_data = merged_data[[wafer_id_query, condition_col]].drop_duplicates()
-                
-                if site_col:
-                    site_data = merged_data[[wafer_id_query, site_col]].drop_duplicates()
-                    transformed_data = pd.merge(transformed_data, site_data, on=wafer_id_query, how='left')
-                else:
-                    # 创建虚拟Site ID
-                    merged_data['Site_ID'] = merged_data.groupby(wafer_id_query).cumcount() + 1
-                    site_col = 'Site_ID'
-                    site_data = merged_data[[wafer_id_query, site_col]].drop_duplicates()
-                    transformed_data = pd.merge(transformed_data, site_data, on=wafer_id_query, how='left')
-                
-                # 为每个参数创建列
-                for param in measure_parameters:
-                    param_data = merged_data[merged_data[parameter_col] == param]
-                    param_data = param_data[[wafer_id_query, site_col, value_col]].rename(columns={value_col: param})
-                    transformed_data = pd.merge(transformed_data, param_data, on=[wafer_id_query, site_col], how='left')
-                
-                print(f"备用转换数据形状: {transformed_data.shape}")
-                
-                return transformed_data, condition_types, measure_parameters, wafer_id_query, condition_col, site_col
-        
-        except Exception as e:
-            print(f"转换数据时出错: {e}")
-            return None, None, None, None, None, None
-
-    def create_sample_data(self):
-        """创建模拟数据集，包含Site ID信息"""
-        n_wafers = 30
-        
-        # 创建wafer IDs
-        wafer_ids = [f'Wafer_{i:03d}' for i in range(1, n_wafers+1)]
-        
-        # 条件类型
-        condition_types = ['Baseline', '2nd tool']
-        
-        # 创建condition_list数据
-        condition_data = pd.DataFrame({
-            'WaferID': wafer_ids,
-            'Condition': np.random.choice(condition_types, size=n_wafers)
-        })
-        
-        # 创建量测数据
-        param_names = ['Con_M3LA', 'Con_M3LB', 'Rc_V2v', 'LK_M3LA', 'LK_M3LB']
-        
-        rows = []
-        for wafer_id in wafer_ids:
-            for param in param_names:
-                # 为每个wafer和每个参数创建多个site测量
-                n_sites = np.random.randint(1, 5)
-                for site in range(1, n_sites+1):
-                    # 随机生成0-9之间的值，添加少量异常值
-                    value = np.random.uniform(0, 9)
-                    
-                    # 5%的概率生成异常值
-                    if np.random.random() < 0.05:
-                        value = value * (3 + np.random.random() * 2)  # 3-5倍的异常值
-                    
-                    rows.append({
-                        'Wafer ID': wafer_id,
-                        'Parameter Name': param,
-                        'Site': f'Site_{site}',
-                        'Site Value': value
-                    })
-        
-        query_data = pd.DataFrame(rows)
-        
-        self.query_data = query_data
-        self.condition_data = condition_data
-        
-        QMessageBox.information(self, "提示", "已创建模拟数据")
-
-    def update_parameter_combo(self):
-        """更新参数下拉选择框"""
-        if not self.available_parameters:
-            return
-        
-        # 清除当前选项
-        self.param_combo.clear()
-        
-        # 添加参数选项
-        for param in self.available_parameters:
-            self.param_combo.addItem(param)
-        
-        # 默认选择第一个参数
-        if self.param_combo.count() > 0:
-            self.current_parameter = self.available_parameters[0]
-            self.update_plot()
-
-    def update_table_view(self):
-        """更新数据表格视图"""
-        if self.transformed_data is not None:
-            self.table_model.setData(self.transformed_data)
-            
-            # 自动调整列宽
-            header = self.table_view.horizontalHeader()
-            for i in range(self.table_model.columnCount()):
-                header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
-
-    def on_parameter_changed(self, index):
-        """当参数选择改变时调用"""
-        if index >= 0 and index < len(self.available_parameters):
-            self.current_parameter = self.available_parameters[index]
-            self.update_plot()
-
-    def update_plot(self):
-        """更新图表"""
-        if self.transformed_data is None or self.current_parameter is None:
-            return
-        
-        # 更新箱形图
-        self.update_box_plot()
-        
-        # 更新QQ图
-        self.update_qq_plot()
-
-    def update_box_plot(self):
-        """更新箱形图"""
-        # 清除当前图表
-        self.box_fig.clear()
-        ax = self.box_fig.add_subplot(111)
-        
-        # 为每个Wafer ID创建平均值数据用于箱线图
-        wafer_avg_data = self.transformed_data.groupby([self.wafer_id_col, self.condition_col])[self.current_parameter].mean().reset_index()
-        
-        # 确保Baseline总是第一个，2nd tool总是第二个
-        ordered_groups = []
-        for expected_group in ["Baseline", "2nd tool"]:
-            if expected_group in self.condition_types:
-                ordered_groups.append(expected_group)
-        
-        # 如果有其他不在预期内的组，也添加进来
-        for group in self.condition_types:
-            if group not in ordered_groups:
-                ordered_groups.append(group)
-        
-        # 准备数据
-        box_data = []
-        labels = []
-        
-        for group in ordered_groups:
-            # 获取当前组和参数的Wafer平均数据
-            mask = wafer_avg_data[self.condition_col] == group
-            group_data = wafer_avg_data.loc[mask, self.current_parameter].dropna()
-            
-            if len(group_data) > 0:
-                box_data.append(group_data)
-                labels.append(group)
-        
-        if not box_data:
-            ax.text(0.5, 0.5, f"无数据可用于 {self.current_parameter}", 
-                   ha='center', va='center', transform=ax.transAxes)
-            self.box_canvas.draw()
-            return
-        
-        # 创建箱线图
-        colors = []
-        for label in labels:
-            if label == "Baseline":
-                colors.append('lightblue')
-            elif label == "2n
+    sys.exit(app.exec())
