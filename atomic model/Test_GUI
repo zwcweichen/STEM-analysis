@@ -845,7 +845,7 @@ class WaferAnalysisApp(QMainWindow):
         
         if not box_data:
             ax.text(0.5, 0.5, f"无数据可用于 {self.current_parameter}", 
-                   ha='center', va='center', transform=ax.transAxes)
+                ha='center', va='center', transform=ax.transAxes)
             self.box_canvas.draw()
             return
         
@@ -871,7 +871,7 @@ class WaferAnalysisApp(QMainWindow):
         ax.set_title(f'Box Plot - {self.current_parameter}')
         ax.set_ylabel(self.current_parameter)
         
-        # 标记临时选择的点（用红色X）
+        # 标记临时选择的点（用红色X）- 仅在标记模式下
         if mark_only and self.current_parameter in self.temp_selected_points and self.temp_selected_points[self.current_parameter]:
             excluded_data = []
             
@@ -902,39 +902,8 @@ class WaferAnalysisApp(QMainWindow):
                 x_positions, y_values = zip(*excluded_data)
                 ax.scatter(x_positions, y_values, color='red', marker='x', s=100, alpha=0.7)
         
-        # 标记已排除的点（仅用于显示，非标记模式下）
-        elif not mark_only and self.current_parameter in self.excluded_points and self.excluded_points[self.current_parameter]:
-            excluded_data = []
-            
-            # 对每个组单独标记
-            for group_idx, group in enumerate(labels):
-                # 获取被排除的点
-                excluded = [
-                    (wafer_id, site_id) for cond, wafer_id, site_id in self.excluded_points[self.current_parameter]
-                    if cond == group
-                ]
-                
-                if excluded:
-                    original_data = self.transformed_data.copy()
-                    for wafer_id, site_id in excluded:
-                        wafer_mask = original_data[self.wafer_id_col] == wafer_id
-                        site_mask = original_data[self.site_col] == site_id
-                        group_mask = original_data[self.condition_col] == group
-                        # 获取这个点的值
-                        points = original_data[wafer_mask & site_mask & group_mask][self.current_parameter].dropna()
-                        
-                        if len(points) > 0:
-                            # 添加到排除数据列表
-                            for val in points:
-                                excluded_data.append((group_idx + 1, val))
-            
-            # 在箱线图上标记这些点
-            if excluded_data:
-                x_positions, y_values = zip(*excluded_data)
-                ax.scatter(x_positions, y_values, color='red', marker='x', s=100, alpha=0.7)
-        
         # 刷新画布
-        self.box_canvas.draw() 
+        self.box_canvas.draw()
 
     def update_qq_plot(self, mark_only=False):
         """更新QQ图"""
@@ -1001,7 +970,7 @@ class WaferAnalysisApp(QMainWindow):
             ax.plot(sorted_data, norm_quantiles, color=color, marker=marker,
                    linestyle='-', label=group, markersize=6)
         
-        # 标记临时选择的点（红色X）
+        # 标记临时选择的点（红色X）- 仅在标记模式下
         if mark_only and self.current_parameter in self.temp_selected_points and self.temp_selected_points[self.current_parameter]:
             for group in ordered_groups:
                 # 获取临时选择的点
@@ -1041,47 +1010,7 @@ class WaferAnalysisApp(QMainWindow):
                                         ax.scatter(value, quantile, color='red', marker='x', s=100, alpha=0.7)
                                     except Exception as e:
                                         print(f"标记QQ图点时出错: {e}")
-        
-        # 标记已排除的点（仅用于显示，非标记模式下）
-        elif not mark_only and self.current_parameter in self.excluded_points and self.excluded_points[self.current_parameter]:
-            for group in ordered_groups:
-                # 获取被排除的点
-                excluded = [
-                    (wafer_id, site_id) for cond, wafer_id, site_id in self.excluded_points[self.current_parameter]
-                    if cond == group
-                ]
-                
-                if excluded and group in group_points:
-                    # 获取原始数据中这些点的值和对应的分位数
-                    original_data = self.transformed_data.copy()
-                    
-                    for wafer_id, site_id in excluded:
-                        wafer_mask = original_data[self.wafer_id_col] == wafer_id
-                        site_mask = original_data[self.site_col] == site_id
-                        group_mask = original_data[self.condition_col] == group
-                        # 获取这个点的值
-                        points = original_data[wafer_mask & site_mask & group_mask][self.current_parameter].dropna()
-                        
-                        if len(points) > 0:
-                            # 对每个点计算其对应的正态分位数
-                            for value in points:
-                                # 在对应组的数据中找到这个值应该在的位置
-                                group_values = np.sort(group_points[group]['values'])
-                                n = len(group_values)
-                                
-                                if n > 0:
-                                    try:
-                                        # 找到最接近的值的索引
-                                        idx = min(range(len(group_values)), key=lambda i: abs(group_values[i] - value))
-                                        # 计算对应的概率
-                                        prob = (idx + 1 - 0.375) / (n + 0.25)
-                                        # 计算正态分位数
-                                        quantile = stats.norm.ppf(prob)
-                                        
-                                        # 在图上标记
-                                        ax.scatter(value, quantile, color='red', marker='x', s=100, alpha=0.7)
-                                    except Exception as e:
-                                        print(f"标记QQ图点时出错: {e}")
+    
         
         # 添加标题和标签
         ax.set_title(f'Normal Quantile Plot - {self.current_parameter}')
