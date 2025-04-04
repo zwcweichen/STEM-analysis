@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy import stats
 import io
-import traceback  # 用于详细错误信息
+import traceback
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
@@ -94,6 +94,12 @@ class InteractiveFigureCanvas(FigureCanvas):
                     ax, self.on_select_lasso, useblit=True
                 )
 
+    def disable_selection(self):
+        """禁用选择模式"""
+        if self.selector:
+            self.selector.set_active(False)
+            self.selector = None
+
     def on_select(self, eclick, erelease):
         """矩形选择回调"""
         if not self.figure.axes:
@@ -116,6 +122,9 @@ class InteractiveFigureCanvas(FigureCanvas):
 
             if len(selected_indices) > 0 and self.callback:
                 self.callback(selected_indices, line)
+                
+        # 选择完成后自动禁用选择器
+        self.disable_selection()
 
     def on_select_lasso(self, verts):
         """套索选择回调"""
@@ -136,6 +145,9 @@ class InteractiveFigureCanvas(FigureCanvas):
 
             if len(selected_indices) > 0 and self.callback:
                 self.callback(selected_indices, line)
+                
+        # 选择完成后自动禁用选择器
+        self.disable_selection()
 
 
 class WaferAnalysisApp(QMainWindow):
@@ -148,13 +160,16 @@ class WaferAnalysisApp(QMainWindow):
         self.query_data = None
         self.condition_data = None
         self.transformed_data = None
+        self.display_data = None  # 用于显示的数据副本，可以排除异常值
         self.wafer_id_col = None
         self.condition_col = None
         self.site_col = None
         self.available_parameters = []
         self.condition_types = []
         self.current_parameter = None
-        self.excluded_points = {}  # 存储被排除的点 {parameter: [(condition, wafer_id), ...]}
+        self.excluded_points = {}  # 存储被排除的点 {parameter: [(condition, wafer_id, site_id), ...]}
+        self.temp_selected_points = {}  # 临时存储被选中的点，等待确认
+        self.operation_history = []  # 用于存储操作历史，支持撤销功能
 
         # 设置菜单栏
         self.create_menu_bar()
@@ -163,7 +178,6 @@ class WaferAnalysisApp(QMainWindow):
         self.setup_ui()
 
     def create_menu_bar(self):
-        # 创建菜单栏
         menu_bar = self.menuBar()
 
         # 文件菜单
@@ -277,16 +291,41 @@ class WaferAnalysisApp(QMainWindow):
         # 主分割窗口
         splitter = QSplitter(Qt.Orientation.Horizontal)
         
-        # 左侧数据表格
+        # 左侧数据表格和统计信息
         table_widget = QWidget()
         table_layout = QVBoxLayout(table_widget)
+        
+        # 添加数据表格和统计信息的垂直分割
+        table_splitter = QSplitter(Qt.Orientation.Vertical)
+        
+        # 上部分：数据表格
+        table_upper = QWidget()
+        table_upper_layout = QVBoxLayout(table_upper)
         table_label = QLabel("数据表格")
         self.table_view = QTableView()
         self.table_model = PandasModel()
         self.table_view.setModel(self.table_model)
         
-        table_layout.addWidget(table_label)
-        table_layout.addWidget(self.table_view)
+        table_upper_layout.addWidget(table_label)
+        table_upper_layout.addWidget(self.table_view)
+        
+        # 下部分：统计信息
+        table_lower = QWidget()
+        table_lower_layout = QVBoxLayout(table_lower)
+        stats_label = QLabel("统计结果")
+        self.stats_view = QTableView()
+        self.stats_model = PandasModel()
+        self.stats_view.setModel(self.stats_model)
+        
+        table_lower_layout.addWidget(stats_label)
+        table_lower_layout.addWidget(self.stats_view)
+        
+        # 添加到分割器
+        table_splitter.addWidget(table_upper)
+        table_splitter.addWidget(table_lower)
+        table_splitter.setSizes([600, 200])  # 设置初始比例
+        
+        table_layout.addWidget(table_splitter)
         
         # 右侧图表区域
         plot_widget = QWidget()
@@ -329,15 +368,21 @@ class WaferAnalysisApp(QMainWindow):
         
         self.rect_select_btn = QPushButton("矩形选择")
         self.lasso_select_btn = QPushButton("套索选择")
+        self.confirm_select_btn = QPushButton("确认删除")  # 新增确认删除按钮
         self.clear_select_btn = QPushButton("清除选择")
+        self.undo_select_btn = QPushButton("上一步")
         
         self.rect_select_btn.clicked.connect(lambda: self.enable_selection_mode('rectangle'))
         self.lasso_select_btn.clicked.connect(lambda: self.enable_selection_mode('lasso'))
+        self.confirm_select_btn.clicked.connect(self.confirm_selection)  # 连接确认删除功能
         self.clear_select_btn.clicked.connect(self.clear_selection)
+        self.undo_select_btn.clicked.connect(self.undo_selection)
         
         plot_controls_layout.addWidget(self.rect_select_btn)
         plot_controls_layout.addWidget(self.lasso_select_btn)
+        plot_controls_layout.addWidget(self.confirm_select_btn)
         plot_controls_layout.addWidget(self.clear_select_btn)
+        plot_controls_layout.addWidget(self.undo_select_btn)
         
         plot_layout.addWidget(plot_controls)
         
@@ -356,7 +401,10 @@ class WaferAnalysisApp(QMainWindow):
         self.param_combo.setEnabled(False)
         self.rect_select_btn.setEnabled(False)
         self.lasso_select_btn.setEnabled(False)
+        self.confirm_select_btn.setEnabled(False)  # 初始状态禁用确认按钮
         self.clear_select_btn.setEnabled(False)
+        self.undo_select_btn.setEnabled(False)
+
 
     def load_query_data(self):
         """加载查询数据文件"""
@@ -408,13 +456,18 @@ class WaferAnalysisApp(QMainWindow):
             
             if transformed_data is not None:
                 self.transformed_data = transformed_data
+                # 创建一个副本用于图表显示，以便在不改变原始数据的情况下移除异常值
+                self.display_data = transformed_data.copy()
                 self.condition_types = condition_types
                 self.wafer_id_col = wafer_id_col
                 self.condition_col = condition_col
                 self.site_col = site_col
                 
-                # 清除排除点
+                # 清除排除点和临时选择
                 self.excluded_points = {}
+                self.temp_selected_points = {}
+                # 添加历史操作记录，用于"上一步"功能
+                self.operation_history = []
                 
                 # 更新可用参数
                 self.available_parameters = []
@@ -439,6 +492,8 @@ class WaferAnalysisApp(QMainWindow):
                 self.rect_select_btn.setEnabled(True)
                 self.lasso_select_btn.setEnabled(True)
                 self.clear_select_btn.setEnabled(True)
+                self.confirm_select_btn.setEnabled(False)  # 初始没有选择，禁用确认按钮
+                self.undo_select_btn.setEnabled(False)  # 初始没有操作，禁用上一步
                 
                 QMessageBox.information(self, "成功", "数据处理完成")
             else:
@@ -473,9 +528,9 @@ class WaferAnalysisApp(QMainWindow):
             site_col = None
             
             for col in self.query_data.columns:
-                if "Parameter Name" in col or "name" in col.lower():
+                if "parameter name" in col.lower() or "name" in col.lower():
                     parameter_col = col
-                elif "value" in col.lower() or "site value" in col.lower():
+                elif "value" in col.lower():
                     value_col = col
                 elif "site" in col.lower() and "value" not in col.lower():
                     site_col = col
@@ -505,7 +560,6 @@ class WaferAnalysisApp(QMainWindow):
                 self.condition_data,
                 left_on=wafer_id_query,
                 right_on=wafer_id_condition,
-                how='left'
             )
             
             # 使用Site ID创建透视表
@@ -517,7 +571,6 @@ class WaferAnalysisApp(QMainWindow):
                         index=[wafer_id_query, site_col, condition_col],
                         columns=parameter_col,
                         values=value_col,
-                        aggfunc='first'  # 不进行聚合，保留原始值
                     ).reset_index()
                 else:
                     # 如果找不到Site ID列，创建一个虚拟的
@@ -612,7 +665,6 @@ class WaferAnalysisApp(QMainWindow):
         QMessageBox.information(self, "提示", "已创建模拟数据")
 
     def update_parameter_combo(self):
-        """更新参数下拉选择框"""
         if not self.available_parameters:
             return
         
@@ -627,6 +679,7 @@ class WaferAnalysisApp(QMainWindow):
         if self.param_combo.count() > 0:
             self.current_parameter = self.available_parameters[0]
             self.update_plot()
+            self.update_stats_view()  # 更新统计信息表
 
     def update_table_view(self):
         """更新数据表格视图"""
@@ -638,31 +691,133 @@ class WaferAnalysisApp(QMainWindow):
             for i in range(self.table_model.columnCount()):
                 header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
 
+    def calculate_statistics(self, parameter, group_col, group_values, excluded_points=None):
+        """计算统计信息：Mean, Std Dev, K-shift，直接使用所有site的数据"""
+        stats_dict = {}
+        
+        for group in group_values:
+            # 获取该组的所有数据(所有site，不做wafer平均)
+            mask = self.transformed_data[group_col] == group
+            group_data = self.transformed_data.loc[mask, parameter].dropna()
+            
+            # 排除被标记的点
+            if excluded_points and parameter in excluded_points:
+                exclude_points = excluded_points[parameter]
+                for ex_group, ex_wafer_id, ex_site_id in exclude_points:
+                    if ex_group == group:
+                        # 排除特定wafer和site的点
+                        wafer_mask = self.transformed_data[self.wafer_id_col] == ex_wafer_id
+                        site_mask = self.transformed_data[self.site_col] == ex_site_id
+                        exclude_mask = wafer_mask & site_mask & mask
+                        group_data = group_data[~exclude_mask.reindex(group_data.index, fill_value=False)]
+            
+            if len(group_data) > 0:
+                # 计算均值
+                mean_value = np.mean(group_data)
+                # 计算标准差
+                std_dev = np.std(group_data, ddof=1)
+                
+                stats_dict[group] = {
+                    'Mean': mean_value,
+                    'Std Dev': std_dev,
+                    'Count': len(group_data)
+                }
+            else:
+                stats_dict[group] = {
+                    'Mean': np.nan,
+                    'Std Dev': np.nan,
+                    'Count': 0
+                }
+        
+        # 计算K-shift (如果有两个或更多组)
+        if len(group_values) >= 2:
+            baseline_group = group_values[0]  # 假设第一个为baseline
+            second_tool_group = group_values[1]  # 假设第二个为2nd tool
+            
+            if (baseline_group in stats_dict and second_tool_group in stats_dict and
+                not np.isnan(stats_dict[baseline_group]['Std Dev']) and
+                stats_dict[baseline_group]['Std Dev'] != 0):
+                
+                stats_dict[second_tool_group]['K-shift'] = (
+                    stats_dict[second_tool_group]['Mean'] - stats_dict[baseline_group]['Mean']
+                ) / stats_dict[baseline_group]['Std Dev']
+            else:
+                if second_tool_group in stats_dict:
+                    stats_dict[second_tool_group]['K-shift'] = np.nan
+        
+        return stats_dict
+
+    def update_stats_view(self):
+        """更新统计信息表格"""
+        if self.transformed_data is None or self.current_parameter is None:
+            return
+            
+        # 计算统计信息
+        stats_dict = self.calculate_statistics(
+            self.current_parameter,
+            self.condition_col,
+            self.condition_types,
+            self.excluded_points
+        )
+        
+        # 创建统计信息DataFrame
+        stats_rows = []
+        for group, stats in stats_dict.items():
+            row = {'Condition': group}
+            row.update(stats)
+            stats_rows.append(row)
+        
+        stats_df = pd.DataFrame(stats_rows)
+        
+        # 如果存在，添加K-shift列
+        if len(stats_rows) > 1 and 'K-shift' in stats_rows[1]:
+            # 确保K-shift列在最后
+            cols = [col for col in stats_df.columns if col != 'K-shift']
+            if 'K-shift' in stats_df.columns:
+                cols.append('K-shift')
+            stats_df = stats_df[cols]
+        
+        # 更新统计表模型
+        self.stats_model.setData(stats_df)
+        
+        # 自动调整列宽
+        header = self.stats_view.horizontalHeader()
+        for i in range(self.stats_model.columnCount()):
+            header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+
     def on_parameter_changed(self, index):
         """当参数选择改变时调用"""
         if index >= 0 and index < len(self.available_parameters):
             self.current_parameter = self.available_parameters[index]
+            # 清除临时选择的点
+            self.temp_selected_points = {}
+            self.confirm_select_btn.setEnabled(False)
             self.update_plot()
+            self.update_stats_view()  # 更新统计视图
 
-    def update_plot(self):
+    def update_plot(self, mark_only=False):
         """更新图表"""
         if self.transformed_data is None or self.current_parameter is None:
             return
+            
+        # 如果是首次加载或切换参数且不是仅标记模式，创建显示数据副本
+        if (self.display_data is None or self.current_parameter not in self.excluded_points) and not mark_only:
+            self.display_data = self.transformed_data.copy()
         
         # 更新箱形图
-        self.update_box_plot()
+        self.update_box_plot(mark_only)
         
         # 更新QQ图
-        self.update_qq_plot()
+        self.update_qq_plot(mark_only)
 
-    def update_box_plot(self):
+    def update_box_plot(self, mark_only=False):
         """更新箱形图"""
         # 清除当前图表
         self.box_fig.clear()
         ax = self.box_fig.add_subplot(111)
         
-        # 为每个Wafer ID创建平均值数据用于箱线图
-        wafer_avg_data = self.transformed_data.groupby([self.wafer_id_col, self.condition_col])[self.current_parameter].mean().reset_index()
+        # 使用所有site数据，不做wafer平均
+        plot_data = self.display_data.copy()
         
         # 确保Baseline总是第一个，2nd tool总是第二个
         ordered_groups = []
@@ -680,9 +835,9 @@ class WaferAnalysisApp(QMainWindow):
         labels = []
         
         for group in ordered_groups:
-            # 获取当前组和参数的Wafer平均数据
-            mask = wafer_avg_data[self.condition_col] == group
-            group_data = wafer_avg_data.loc[mask, self.current_parameter].dropna()
+            # 获取当前组的所有site数据
+            mask = plot_data[self.condition_col] == group
+            group_data = plot_data.loc[mask, self.current_parameter].dropna()
             
             if len(group_data) > 0:
                 box_data.append(group_data)
@@ -703,7 +858,6 @@ class WaferAnalysisApp(QMainWindow):
                 colors.append('lightgreen')
             else:
                 colors.append('lightgray')
-                colors.append('lightblue')
         
         # 绘制箱线图
         boxplot = ax.boxplot(box_data, patch_artist=True, labels=labels)
@@ -717,38 +871,79 @@ class WaferAnalysisApp(QMainWindow):
         ax.set_title(f'Box Plot - {self.current_parameter}')
         ax.set_ylabel(self.current_parameter)
         
-        # 标记选中的点
-        if self.current_parameter in self.excluded_points and self.excluded_points[self.current_parameter]:
+        # 标记临时选择的点（用红色X）
+        if mark_only and self.current_parameter in self.temp_selected_points and self.temp_selected_points[self.current_parameter]:
+            excluded_data = []
+            
             # 对每个组单独标记
             for group_idx, group in enumerate(labels):
-                # 获取该组所有的Wafer ID
-                group_wafers = wafer_avg_data[wafer_avg_data[self.condition_col] == group][self.wafer_id_col].values
-                group_values = wafer_avg_data[wafer_avg_data[self.condition_col] == group][self.current_parameter].values
+                # 获取临时选择的点
+                temp_selected = [
+                    (wafer_id, site_id) for cond, wafer_id, site_id in self.temp_selected_points[self.current_parameter]
+                    if cond == group
+                ]
                 
-                # 找出被选中的Wafer ID
-                selected_wafers = [wafer_id for cond, wafer_id in self.excluded_points[self.current_parameter] if cond == group]
-                
-                if selected_wafers:
-                    # 获取这些Wafer的位置和值
-                    selected_indices = [i for i, wid in enumerate(group_wafers) if wid in selected_wafers]
-                    if selected_indices:  # 确保有选中的点
-                        selected_values = [group_values[i] for i in selected_indices if i < len(group_values)]
+                if temp_selected:
+                    original_data = self.transformed_data.copy()
+                    for wafer_id, site_id in temp_selected:
+                        wafer_mask = original_data[self.wafer_id_col] == wafer_id
+                        site_mask = original_data[self.site_col] == site_id
+                        group_mask = original_data[self.condition_col] == group
+                        # 获取这个点的值
+                        points = original_data[wafer_mask & site_mask & group_mask][self.current_parameter].dropna()
                         
-                        # 在箱线图上标记这些点
-                        x_positions = [group_idx + 1] * len(selected_values)  # 箱线图中组的x位置
-                        ax.scatter(x_positions, selected_values, color='red', marker='x', s=100, alpha=0.7)
+                        if len(points) > 0:
+                            # 添加到排除数据列表
+                            for val in points:
+                                excluded_data.append((group_idx + 1, val))
+            
+            # 在箱线图上标记这些点
+            if excluded_data:
+                x_positions, y_values = zip(*excluded_data)
+                ax.scatter(x_positions, y_values, color='red', marker='x', s=100, alpha=0.7)
+        
+        # 标记已排除的点（仅用于显示，非标记模式下）
+        elif not mark_only and self.current_parameter in self.excluded_points and self.excluded_points[self.current_parameter]:
+            excluded_data = []
+            
+            # 对每个组单独标记
+            for group_idx, group in enumerate(labels):
+                # 获取被排除的点
+                excluded = [
+                    (wafer_id, site_id) for cond, wafer_id, site_id in self.excluded_points[self.current_parameter]
+                    if cond == group
+                ]
+                
+                if excluded:
+                    original_data = self.transformed_data.copy()
+                    for wafer_id, site_id in excluded:
+                        wafer_mask = original_data[self.wafer_id_col] == wafer_id
+                        site_mask = original_data[self.site_col] == site_id
+                        group_mask = original_data[self.condition_col] == group
+                        # 获取这个点的值
+                        points = original_data[wafer_mask & site_mask & group_mask][self.current_parameter].dropna()
+                        
+                        if len(points) > 0:
+                            # 添加到排除数据列表
+                            for val in points:
+                                excluded_data.append((group_idx + 1, val))
+            
+            # 在箱线图上标记这些点
+            if excluded_data:
+                x_positions, y_values = zip(*excluded_data)
+                ax.scatter(x_positions, y_values, color='red', marker='x', s=100, alpha=0.7)
         
         # 刷新画布
-        self.box_canvas.draw()
+        self.box_canvas.draw() 
 
-    def update_qq_plot(self):
+    def update_qq_plot(self, mark_only=False):
         """更新QQ图"""
         # 清除当前图表
         self.qq_fig.clear()
         ax = self.qq_fig.add_subplot(111)
         
-        # 首先计算每个Wafer ID的平均值用于QQ图
-        wafer_avg_data = self.transformed_data.groupby([self.wafer_id_col, self.condition_col])[self.current_parameter].mean().reset_index()
+        # 使用所有site数据，不做wafer平均
+        plot_data = self.display_data.copy()
         
         # 确保Baseline和2nd tool始终是固定颜色
         color_map = {
@@ -776,15 +971,16 @@ class WaferAnalysisApp(QMainWindow):
         
         for group in ordered_groups:
             # 获取当前组的数据
-            mask = wafer_avg_data[self.condition_col] == group
-            group_data = wafer_avg_data.loc[mask, self.current_parameter].dropna()
+            mask = plot_data[self.condition_col] == group
+            group_data = plot_data.loc[mask, self.current_parameter].dropna()
             
             if len(group_data) == 0:
                 continue
             
             # 保存原始数据点
             group_points[group] = {
-                'wafer_ids': wafer_avg_data.loc[mask, self.wafer_id_col].values,
+                'wafer_ids': plot_data.loc[mask, self.wafer_id_col].values,
+                'site_ids': plot_data.loc[mask, self.site_col].values,
                 'values': group_data.values
             }
             
@@ -805,50 +1001,87 @@ class WaferAnalysisApp(QMainWindow):
             ax.plot(sorted_data, norm_quantiles, color=color, marker=marker,
                    linestyle='-', label=group, markersize=6)
         
-        # 标记选中的点
-        if self.current_parameter in self.excluded_points and self.excluded_points[self.current_parameter]:
+        # 标记临时选择的点（红色X）
+        if mark_only and self.current_parameter in self.temp_selected_points and self.temp_selected_points[self.current_parameter]:
             for group in ordered_groups:
-                if group not in group_points:
-                    continue
-                    
-                # 获取该组被标记的Wafer ID
-                selected_wafers = [wafer_id for cond, wafer_id in self.excluded_points[self.current_parameter] if cond == group]
+                # 获取临时选择的点
+                temp_selected = [
+                    (wafer_id, site_id) for cond, wafer_id, site_id in self.temp_selected_points[self.current_parameter]
+                    if cond == group
+                ]
                 
-                if selected_wafers:
-                    # 找出对应点的值和索引
-                    wafer_ids = group_points[group]['wafer_ids']
-                    values = group_points[group]['values']
-                    selected_indices = [i for i, wid in enumerate(wafer_ids) if wid in selected_wafers]
+                if temp_selected and group in group_points:
+                    # 获取原始数据中这些点的值和对应的分位数
+                    original_data = self.transformed_data.copy()
                     
-                    if selected_indices:
-                        # 获取选中点对应的值
-                        selected_values = [values[i] for i in selected_indices if i < len(values)]
+                    for wafer_id, site_id in temp_selected:
+                        wafer_mask = original_data[self.wafer_id_col] == wafer_id
+                        site_mask = original_data[self.site_col] == site_id
+                        group_mask = original_data[self.condition_col] == group
+                        # 获取这个点的值
+                        points = original_data[wafer_mask & site_mask & group_mask][self.current_parameter].dropna()
                         
-                        if not selected_values:
-                            continue
-                            
-                        # 计算对应的正态分位数
-                        n = len(values)
-                        sorted_indices = np.argsort(values)
-                        rank_map = {idx: rank for rank, idx in enumerate(sorted_indices)}
+                        if len(points) > 0:
+                            # 对每个点计算其对应的正态分位数
+                            for value in points:
+                                # 在对应组的数据中找到这个值应该在的位置
+                                group_values = np.sort(group_points[group]['values'])
+                                n = len(group_values)
+                                
+                                if n > 0:
+                                    try:
+                                        # 找到最接近的值的索引
+                                        idx = min(range(len(group_values)), key=lambda i: abs(group_values[i] - value))
+                                        # 计算对应的概率
+                                        prob = (idx + 1 - 0.375) / (n + 0.25)
+                                        # 计算正态分位数
+                                        quantile = stats.norm.ppf(prob)
+                                        
+                                        # 在图上标记
+                                        ax.scatter(value, quantile, color='red', marker='x', s=100, alpha=0.7)
+                                    except Exception as e:
+                                        print(f"标记QQ图点时出错: {e}")
+        
+        # 标记已排除的点（仅用于显示，非标记模式下）
+        elif not mark_only and self.current_parameter in self.excluded_points and self.excluded_points[self.current_parameter]:
+            for group in ordered_groups:
+                # 获取被排除的点
+                excluded = [
+                    (wafer_id, site_id) for cond, wafer_id, site_id in self.excluded_points[self.current_parameter]
+                    if cond == group
+                ]
+                
+                if excluded and group in group_points:
+                    # 获取原始数据中这些点的值和对应的分位数
+                    original_data = self.transformed_data.copy()
+                    
+                    for wafer_id, site_id in excluded:
+                        wafer_mask = original_data[self.wafer_id_col] == wafer_id
+                        site_mask = original_data[self.site_col] == site_id
+                        group_mask = original_data[self.condition_col] == group
+                        # 获取这个点的值
+                        points = original_data[wafer_mask & site_mask & group_mask][self.current_parameter].dropna()
                         
-                        try:
-                            selected_ranks = [rank_map[idx] for idx in selected_indices if idx in rank_map]
-                            if selected_ranks:
-                                selected_probs = [(r + 1 - 0.375) / (n + 0.25) for r in selected_ranks]
-                                selected_quantiles = stats.norm.ppf(selected_probs)
+                        if len(points) > 0:
+                            # 对每个点计算其对应的正态分位数
+                            for value in points:
+                                # 在对应组的数据中找到这个值应该在的位置
+                                group_values = np.sort(group_points[group]['values'])
+                                n = len(group_values)
                                 
-                                # 确保数据长度匹配
-                                min_len = min(len(selected_values), len(selected_quantiles))
-                                
-                                # 在图上标记
-                                ax.scatter(
-                                    selected_values[:min_len], 
-                                    selected_quantiles[:min_len], 
-                                    color='red', marker='x', s=100, alpha=0.7
-                                )
-                        except Exception as e:
-                            print(f"标记QQ图点时出错: {e}")
+                                if n > 0:
+                                    try:
+                                        # 找到最接近的值的索引
+                                        idx = min(range(len(group_values)), key=lambda i: abs(group_values[i] - value))
+                                        # 计算对应的概率
+                                        prob = (idx + 1 - 0.375) / (n + 0.25)
+                                        # 计算正态分位数
+                                        quantile = stats.norm.ppf(prob)
+                                        
+                                        # 在图上标记
+                                        ax.scatter(value, quantile, color='red', marker='x', s=100, alpha=0.7)
+                                    except Exception as e:
+                                        print(f"标记QQ图点时出错: {e}")
         
         # 添加标题和标签
         ax.set_title(f'Normal Quantile Plot - {self.current_parameter}')
@@ -875,6 +1108,13 @@ class WaferAnalysisApp(QMainWindow):
 
     def enable_selection_mode(self, mode):
         """启用选择模式"""
+        # 禁用其他按钮，避免同时激活多个选择模式
+        self.rect_select_btn.setEnabled(False)
+        self.lasso_select_btn.setEnabled(False)
+        
+        # 清除临时选择的点
+        self.temp_selected_points = {}
+        
         # 在当前活跃的选项卡上启用选择
         current_tab_index = self.findChild(QTabWidget).currentIndex()
         
@@ -883,17 +1123,61 @@ class WaferAnalysisApp(QMainWindow):
         else:  # QQ Plot
             self.qq_canvas.enable_selection(mode, self.on_qq_selection)
 
+    def confirm_selection(self):
+        """确认删除当前选择的点"""
+        if not self.temp_selected_points or self.current_parameter not in self.temp_selected_points:
+            return
+        
+        # 保存操作前的状态，用于上一步功能
+        if self.current_parameter in self.excluded_points:
+            prev_excluded = self.excluded_points[self.current_parameter].copy()
+        else:
+            prev_excluded = []
+        prev_display_data = self.display_data.copy()
+        self.operation_history.append((self.current_parameter, prev_excluded, prev_display_data))
+        self.undo_select_btn.setEnabled(True)
+        
+        # 更新排除点列表
+        if self.current_parameter not in self.excluded_points:
+            self.excluded_points[self.current_parameter] = []
+        
+        # 添加临时选择的点
+        for point in self.temp_selected_points[self.current_parameter]:
+            if point not in self.excluded_points[self.current_parameter]:
+                self.excluded_points[self.current_parameter].append(point)
+        
+        # 更新显示数据 - 从display_data中移除这些点
+        for condition, wafer_id, site_id in self.temp_selected_points[self.current_parameter]:
+            wafer_mask = self.display_data[self.wafer_id_col] == wafer_id
+            site_mask = self.display_data[self.site_col] == site_id
+            condition_mask = self.display_data[self.condition_col] == condition
+            self.display_data = self.display_data[~(wafer_mask & site_mask & condition_mask)]
+        
+        # 清除临时选择
+        self.temp_selected_points = {}
+        
+        # 更新图表和统计
+        self.update_plot()
+        self.update_stats_view()
+        
+        # 启用选择按钮
+        self.rect_select_btn.setEnabled(True)
+        self.lasso_select_btn.setEnabled(True)
+        
+        # 禁用确认按钮
+        self.confirm_select_btn.setEnabled(False)    
+
     def on_box_selection(self, indices, line):
         """箱形图选择回调"""
         if not indices.size:
             return
             
         try:
+            # 启用确认按钮
+            self.confirm_select_btn.setEnabled(True)
+            
             # 获取当前活跃的选项卡
             tab_widget = self.findChild(QTabWidget)
-            
-            # 计算每个Wafer ID的平均值用于箱线图
-            wafer_avg_data = self.transformed_data.groupby([self.wafer_id_col, self.condition_col])[self.current_parameter].mean().reset_index()
             
             # 确保Baseline总是第一个，2nd tool总是第二个
             ordered_groups = []
@@ -940,40 +1224,51 @@ class WaferAnalysisApp(QMainWindow):
             else:
                 group = ordered_groups[min(line_index, len(ordered_groups)-1)]
             
-            # 获取该组的Wafer平均数据
-            mask = wafer_avg_data[self.condition_col] == group
-            group_data = wafer_avg_data.loc[mask, self.current_parameter]
-            wafer_ids = wafer_avg_data.loc[mask, self.wafer_id_col].values
+            # 获取所选组在当前显示数据中的所有点
+            mask = self.display_data[self.condition_col] == group
+            # 获取y坐标的所有点
+            y_vals = line.get_ydata()[indices]
             
-            # 处理排序后的索引
-            sorted_indices = np.argsort(group_data)
+            # 找出与这些坐标接近的点
+            selected_points = []  # 存储格式为 (group, wafer_id, site_id)
+            for y_val in y_vals:
+                # 找出接近这个y值的点
+                group_data = self.display_data.loc[mask]
+                # 计算与y值的距离
+                distances = np.abs(group_data[self.current_parameter] - y_val)
+                # 找出最接近的点
+                if len(distances) > 0:
+                    closest_idx = distances.nsmallest(1).index
+                    if len(closest_idx) > 0:
+                        # 获取对应的wafer ID和site ID
+                        wafer_id = self.display_data.loc[closest_idx, self.wafer_id_col].values[0]
+                        site_id = self.display_data.loc[closest_idx, self.site_col].values[0]
+                        selected_points.append((group, wafer_id, site_id))
             
-            # 确保indices不超出范围
-            valid_indices = [i for i in indices if i < len(wafer_ids)]
-            if not valid_indices:
-                QMessageBox.warning(self, "警告", "未选中有效的数据点")
+            if not selected_points:
+                # 重新启用选择按钮
+                self.rect_select_btn.setEnabled(True)
+                self.lasso_select_btn.setEnabled(True)
+                QMessageBox.warning(self, "警告", "未能找到匹配的数据点")
                 return
             
-            # 获取选中的Wafer ID
-            selected_wafers = [wafer_ids[i] for i in valid_indices]
-            
-            # 更新排除点列表
-            if self.current_parameter not in self.excluded_points:
-                self.excluded_points[self.current_parameter] = []
+            # 更新临时选择点列表
+            if self.current_parameter not in self.temp_selected_points:
+                self.temp_selected_points[self.current_parameter] = []
             
             # 添加新选择的点
-            for wafer_id in selected_wafers:
-                if (group, wafer_id) not in self.excluded_points[self.current_parameter]:
-                    self.excluded_points[self.current_parameter].append((group, wafer_id))
+            for point in selected_points:
+                if point not in self.temp_selected_points[self.current_parameter]:
+                    self.temp_selected_points[self.current_parameter].append(point)
             
-            # 更新图表，标记选中的点
-            self.update_plot()
+            # 更新图表，仅标记选择的点
+            self.update_plot(mark_only=True)
             
-            # 提示用户
-            QMessageBox.information(self, "选择", f"已标记 {len(selected_wafers)} 个点")
-        
         except Exception as e:
-            QMessageBox.warning(self, "警告", f"处理选择时出错: {str(e)}\n{traceback.format_exc()}")
+            # 重新启用选择按钮
+            self.rect_select_btn.setEnabled(True)
+            self.lasso_select_btn.setEnabled(True)
+            QMessageBox.warning(self, "警告", f"处理选择时出错: {str(e)}")
 
     def on_qq_selection(self, indices, line):
         """QQ图选择回调"""
@@ -981,8 +1276,8 @@ class WaferAnalysisApp(QMainWindow):
             return
             
         try:
-            # 计算每个Wafer ID的平均值
-            wafer_avg_data = self.transformed_data.groupby([self.wafer_id_col, self.condition_col])[self.current_parameter].mean().reset_index()
+            # 启用确认按钮
+            self.confirm_select_btn.setEnabled(True)
             
             # 确保有序的组
             ordered_groups = []
@@ -1002,57 +1297,179 @@ class WaferAnalysisApp(QMainWindow):
                     line_index = i
                     break
             
+            # 如果找不到，尝试通过坐标判断是哪个组的线
+            if line_index < 0:
+                x_coords = line.get_xdata()[indices]
+                y_coords = line.get_ydata()[indices]
+                
+                # 对于每个组，检查其线是否包含接近的点
+                for i, l in enumerate(qq_lines):
+                    l_xdata = l.get_xdata()
+                    l_ydata = l.get_ydata()
+                    
+                    # 找出最接近的点
+                    min_dist = float('inf')
+                    for x, y in zip(x_coords, y_coords):
+                        dists = np.sqrt((l_xdata - x)**2 + (l_ydata - y)**2)
+                        nearest_dist = np.min(dists) if len(dists) > 0 else float('inf')
+                        if nearest_dist < min_dist:
+                            min_dist = nearest_dist
+                            line_index = i
+            
             # 找出对应的组
             if line_index < 0 or line_index >= len(ordered_groups):
+                # 重新启用选择按钮
+                self.rect_select_btn.setEnabled(True)
+                self.lasso_select_btn.setEnabled(True)
                 QMessageBox.warning(self, "警告", "无法确定选择的组")
                 return
             
             group = ordered_groups[line_index]
             
-            # 获取该组的数据
-            mask = wafer_avg_data[self.condition_col] == group
-            group_data = wafer_avg_data.loc[mask, self.current_parameter]
-            wafer_ids = wafer_avg_data.loc[mask, self.wafer_id_col].values
+            # 获取所选点的x值（实际测量值）
+            x_vals = line.get_xdata()[indices]
             
-            # 确保indices不超出范围
-            valid_indices = [i for i in indices if i < len(wafer_ids)]
-            if not valid_indices:
-                QMessageBox.warning(self, "警告", "未选中有效的数据点")
+            # 找出对应的晶圆
+            selected_points = []  # 存储格式为 (group, wafer_id, site_id)
+            mask = self.display_data[self.condition_col] == group
+            group_data = self.display_data[mask]
+            
+            for x_val in x_vals:
+                # 找出接近这个x值的点
+                distances = np.abs(group_data[self.current_parameter] - x_val)
+                if len(distances) > 0:
+                    # 找出最接近的点
+                    closest_idx = distances.nsmallest(1).index
+                    if len(closest_idx) > 0:
+                        # 获取对应的wafer ID和site ID
+                        wafer_id = self.display_data.loc[closest_idx, self.wafer_id_col].values[0]
+                        site_id = self.display_data.loc[closest_idx, self.site_col].values[0]
+                        selected_points.append((group, wafer_id, site_id))
+            
+            if not selected_points:
+                # 重新启用选择按钮
+                self.rect_select_btn.setEnabled(True)
+                self.lasso_select_btn.setEnabled(True)
+                QMessageBox.warning(self, "警告", "未能找到匹配的数据点")
                 return
             
-            # 获取选中的Wafer ID
-            selected_wafers = [wafer_ids[i] for i in valid_indices]
-            
-            # 更新排除点列表
-            if self.current_parameter not in self.excluded_points:
-                self.excluded_points[self.current_parameter] = []
+            # 更新临时选择点列表
+            if self.current_parameter not in self.temp_selected_points:
+                self.temp_selected_points[self.current_parameter] = []
             
             # 添加新选择的点
-            for wafer_id in selected_wafers:
-                if (group, wafer_id) not in self.excluded_points[self.current_parameter]:
-                    self.excluded_points[self.current_parameter].append((group, wafer_id))
+            for point in selected_points:
+                if point not in self.temp_selected_points[self.current_parameter]:
+                    self.temp_selected_points[self.current_parameter].append(point)
             
-            # 更新图表，标记选中的点
-            self.update_plot()
-            
-            # 提示用户
-            QMessageBox.information(self, "选择", f"已标记 {len(selected_wafers)} 个点")
+            # 更新图表，仅标记选择的点
+            self.update_plot(mark_only=True)
             
         except Exception as e:
-            QMessageBox.warning(self, "警告", f"处理选择时出错: {str(e)}\n{traceback.format_exc()}")
+            # 重新启用选择按钮
+            self.rect_select_btn.setEnabled(True)
+            self.lasso_select_btn.setEnabled(True)
+            QMessageBox.warning(self, "警告", f"处理选择时出错: {str(e)}")
 
     def clear_selection(self):
         """清除当前参数的选择"""
         if self.current_parameter in self.excluded_points:
+            # 保存操作前的状态，用于上一步功能
+            prev_excluded = self.excluded_points[self.current_parameter].copy()
+            prev_display_data = self.display_data.copy()
+            self.operation_history.append((self.current_parameter, prev_excluded, prev_display_data))
+            self.undo_select_btn.setEnabled(True)
+            
+            # 删除当前参数的排除点
             del self.excluded_points[self.current_parameter]
+            
+            # 重置显示数据，使其与原始数据一致
+            self.display_data = self.transformed_data.copy()
+            
+            # 清除临时选择
+            if self.current_parameter in self.temp_selected_points:
+                del self.temp_selected_points[self.current_parameter]
+            self.confirm_select_btn.setEnabled(False)
+            
+            # 更新图表和统计
             self.update_plot()
-            QMessageBox.information(self, "清除", f"已清除 {self.current_parameter} 的标记点")
+            self.update_stats_view()
+            
+            # 重新启用选择按钮
+            self.rect_select_btn.setEnabled(True)
+            self.lasso_select_btn.setEnabled(True)
+        elif self.current_parameter in self.temp_selected_points:
+            # 如果有临时选择但没有确认，清除临时选择
+            del self.temp_selected_points[self.current_parameter]
+            self.confirm_select_btn.setEnabled(False)
+            
+            # 更新图表，不显示临时标记
+            self.update_plot()
+            
+            # 重新启用选择按钮
+            self.rect_select_btn.setEnabled(True)
+            self.lasso_select_btn.setEnabled(True)  
 
     def clear_excluded_points(self):
         """清除所有排除点"""
-        self.excluded_points = {}
+        if self.excluded_points:
+            # 保存操作前的状态
+            self.operation_history = []  # 清空操作历史
+            self.undo_select_btn.setEnabled(False)
+            
+            # 清空排除点和临时选择
+            self.excluded_points = {}
+            self.temp_selected_points = {}
+            
+            # 重置显示数据
+            self.display_data = self.transformed_data.copy()
+            
+            # 更新图表和统计
+            self.update_plot()
+            self.update_stats_view()
+            
+            # 禁用确认按钮
+            self.confirm_select_btn.setEnabled(False)
+            
+            # 启用选择按钮
+            self.rect_select_btn.setEnabled(True)
+            self.lasso_select_btn.setEnabled(True)
+
+    def undo_selection(self):
+        """撤销上一次选择操作"""
+        if not self.operation_history:
+            return
+        
+        # 获取上一次操作前的状态
+        last_operation = self.operation_history.pop()
+        parameter, exclude_points, display_data_state = last_operation
+        
+        # 恢复排除点列表
+        if exclude_points:
+            self.excluded_points[parameter] = exclude_points
+        else:
+            # 如果之前没有排除点，删除该键
+            if parameter in self.excluded_points:
+                del self.excluded_points[parameter]
+        
+        # 恢复显示数据状态
+        self.display_data = display_data_state.copy()
+        
+        # 清除临时选择
+        self.temp_selected_points = {}
+        self.confirm_select_btn.setEnabled(False)
+        
+        # 更新图表和统计视图
         self.update_plot()
-        QMessageBox.information(self, "清除", "已清除所有标记点")
+        self.update_stats_view()
+        
+        # 如果没有历史操作了，禁用上一步按钮
+        if not self.operation_history:
+            self.undo_select_btn.setEnabled(False)
+        
+        # 启用选择按钮
+        self.rect_select_btn.setEnabled(True)
+        self.lasso_select_btn.setEnabled(True)   
 
     def export_excel(self):
         """导出Excel，保留原始数据"""
@@ -1066,100 +1483,14 @@ class WaferAnalysisApp(QMainWindow):
         
         if file_name:
             try:
-                # 创建一个ExcelWriter对象
-                with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
-                    # 导出主数据表
-                    self.transformed_data.to_excel(writer, sheet_name='Transformed_Data', index=False)
-                    
-                    # 创建分组数据的表
-                    conditions = self.transformed_data[self.condition_col].unique()
-                    for condition in conditions:
-                        condition_data = self.transformed_data[self.transformed_data[self.condition_col] == condition]
-                        # 获取不包含wafer_id和condition列的纯测量数据
-                        measure_data = condition_data.drop(columns=[self.wafer_id_col, self.condition_col, self.site_col])
-                        
-                        # 创建描述性统计信息表
-                        stats_df = measure_data.describe().T
-                        
-                        # 将条件特定数据和统计信息导出到单独的表
-                        sheet_name = f"{condition}_Data"[:31]  # Excel表名最长为31个字符
-                        condition_data.to_excel(writer, sheet_name=sheet_name, index=False)
-                        
-                        # 统计信息表
-                        stats_sheet_name = f"{condition}_Stats"[:31]
-                        stats_df.to_excel(writer, sheet_name=stats_sheet_name)
-                
-                QMessageBox.information(self, "成功", f"数据已导出到: {file_name}")
+                # 直接导出原始数据表格，简化处理
+                self.transformed_data.to_excel(file_name, index=False)
+                QMessageBox.information(self, "成功", f"原始数据已导出到: {file_name}")
             except Exception as e:
                 QMessageBox.critical(self, "错误", f"导出Excel时出错: {str(e)}")
-
-    def calculate_statistics(self, parameter, group_col, group_values, excluded_wafers=None, jmp_compatible=True):
-        """计算统计信息：Mean, Std Dev, K-shift"""
-        # 为每个Wafer ID计算平均值
-        wafer_avg_data = self.transformed_data.groupby([self.wafer_id_col, self.condition_col])[parameter].mean().reset_index()
-        
-        stats_dict = {}
-        
-        for group in group_values:
-            # 获取该组的数据
-            mask = wafer_avg_data[group_col] == group
-            group_data = wafer_avg_data.loc[mask, parameter].dropna()
-            
-            # 排除被标记的点
-            if excluded_wafers and group in excluded_wafers:
-                exclude_mask = wafer_avg_data[self.wafer_id_col].isin(excluded_wafers[group])
-                group_mask = wafer_avg_data[group_col] == group
-                # 使用组合掩码排除点
-                group_data = group_data[~(exclude_mask[mask] & group_mask[mask])]
-            
-            if len(group_data) > 0:
-                # 计算均值
-                mean_value = np.mean(group_data)
-                
-                # 计算标准差 - 可以选择兼容JMP的计算方法
-                if jmp_compatible:
-                    # JMP默认使用样本标准差(n-1)
-                    std_dev = np.std(group_data, ddof=1)
-                    
-                    # 对于小样本(n<30)，JMP可能会使用偏差校正
-                    if len(group_data) < 30:
-                        # 这是一个简化的偏差校正因子，可能需要根据实际JMP版本调整
-                        correction_factor = np.sqrt((len(group_data) - 1) / len(group_data))
-                        std_dev *= correction_factor
-                else:
-                    # 使用标准的样本标准差计算
-                    std_dev = np.std(group_data, ddof=1)
-                
-                stats_dict[group] = {
-                    'Mean': mean_value,
-                    'Std Dev': std_dev
-                }
-            else:
-                stats_dict[group] = {
-                    'Mean': np.nan,
-                    'Std Dev': np.nan
-                }
-        
-        # 计算K-shift (如果有两个或更多组)
-        if len(group_values) >= 2:
-            baseline_group = group_values[0]  # 假设第一个为baseline
-            second_tool_group = group_values[1]  # 假设第二个为2nd tool
-            
-            if (baseline_group in stats_dict and second_tool_group in stats_dict and
-                not np.isnan(stats_dict[baseline_group]['Std Dev']) and
-                stats_dict[baseline_group]['Std Dev'] != 0):
-                
-                stats_dict[second_tool_group]['K-shift'] = (
-                    stats_dict[second_tool_group]['Mean'] - stats_dict[baseline_group]['Mean']
-                ) / stats_dict[baseline_group]['Std Dev']
-            else:
-                if second_tool_group in stats_dict:
-                    stats_dict[second_tool_group]['K-shift'] = np.nan
-        
-        return stats_dict
-
+    
     def create_ppt(self):
-        """创建PPT报告，排除标记的点"""
+        """创建PPT报告，使用当前显示数据（已排除异常值）"""
         if self.transformed_data is None:
             QMessageBox.warning(self, "警告", "没有可导出的数据")
             return
@@ -1170,15 +1501,6 @@ class WaferAnalysisApp(QMainWindow):
         
         if file_name:
             try:
-                # 准备排除点的字典，格式为 {parameter: {group: [wafer_ids]}}
-                excluded_wafers = {}
-                for param, points in self.excluded_points.items():
-                    excluded_wafers[param] = {}
-                    for group, wafer_id in points:
-                        if group not in excluded_wafers[param]:
-                            excluded_wafers[param][group] = []
-                        excluded_wafers[param][group].append(wafer_id)
-                
                 # 创建演示文稿
                 prs = Presentation()
                 
@@ -1246,23 +1568,14 @@ class WaferAnalysisApp(QMainWindow):
                     fig = Figure(figsize=(4, 1.7), dpi=100)
                     ax = fig.add_subplot(111)
                     
-                    # 为每个Wafer ID创建平均值数据用于箱线图
-                    wafer_avg_data = self.transformed_data.groupby([self.wafer_id_col, self.condition_col])[parameter].mean().reset_index()
-                    
                     # 准备数据
                     box_data = []
                     valid_labels = []
                     
                     for group in ordered_group_values:
-                        # 获取组内参数数据
-                        mask = wafer_avg_data[self.condition_col] == group
-                        group_data = wafer_avg_data.loc[mask, parameter].dropna()
-                        
-                        # 排除被标记的点
-                        if parameter in excluded_wafers and group in excluded_wafers[parameter]:
-                            exclude_mask = wafer_avg_data[self.wafer_id_col].isin(excluded_wafers[parameter][group])
-                            # 保留未被排除的点
-                            group_data = wafer_avg_data.loc[mask & ~exclude_mask, parameter].dropna()
+                        # 使用当前的display_data（已排除异常值）
+                        mask = self.display_data[self.condition_col] == group
+                        group_data = self.display_data.loc[mask, parameter].dropna()
                         
                         if len(group_data) > 0:
                             box_data.append(group_data)
@@ -1309,14 +1622,12 @@ class WaferAnalysisApp(QMainWindow):
                         width=left_panel_width
                     )
                     
-                    # 计算统计数据
-                    param_excluded = {group: wafers for group, wafers in excluded_wafers.get(parameter, {}).items()}
+                    # 计算统计数据 - 使用当前参数的排除点
                     stats_dict = self.calculate_statistics(
                         parameter, 
                         self.condition_col, 
-                        ordered_group_values, 
-                        excluded_wafers=param_excluded,
-                        jmp_compatible=True
+                        ordered_group_values,
+                        self.excluded_points
                     )
                     all_stats[parameter] = stats_dict
                 
@@ -1342,9 +1653,6 @@ class WaferAnalysisApp(QMainWindow):
                         fig = Figure(figsize=(2.9, 1.7), dpi=100)
                         ax = fig.add_subplot(111)
                         
-                        # 首先计算每个Wafer ID的平均值用于QQ图
-                        wafer_avg_data = self.transformed_data.groupby([self.wafer_id_col, self.condition_col])[parameter].mean().reset_index()
-                        
                         # 确保Baseline和2nd tool始终是固定颜色
                         color_map = {
                             "Baseline": 'blue',
@@ -1356,15 +1664,9 @@ class WaferAnalysisApp(QMainWindow):
                         }
                         
                         for group in ordered_group_values:
-                            # 获取当前组的数据
-                            mask = wafer_avg_data[self.condition_col] == group
-                            group_data = wafer_avg_data.loc[mask, parameter].dropna()
-                            
-                            # 排除被标记的点
-                            if parameter in excluded_wafers and group in excluded_wafers[parameter]:
-                                exclude_mask = wafer_avg_data[self.wafer_id_col].isin(excluded_wafers[parameter][group])
-                                # 保留未被排除的点
-                                group_data = wafer_avg_data.loc[mask & ~exclude_mask, parameter].dropna()
+                            # 使用当前的display_data（已排除异常值）
+                            mask = self.display_data[self.condition_col] == group
+                            group_data = self.display_data.loc[mask, parameter].dropna()
                             
                             if len(group_data) == 0:
                                 continue
@@ -1423,8 +1725,7 @@ class WaferAnalysisApp(QMainWindow):
                             x_pos, 
                             y_pos, 
                             width=quantile_plot_width
-                        )
-                
+                        ) 
                 # 创建底部的统计表格 - 调整位置和大小
                 table_rows = len(self.available_parameters) + 2  # 参数数量 + 标题两行
                 table_cols = 5  # Condition, BSL Mean, BSL Std Dev, 2nd Tool Mean, K-shift
@@ -1530,7 +1831,7 @@ class WaferAnalysisApp(QMainWindow):
                 QMessageBox.information(self, "成功", f"已创建PPT文件: {file_name}")
                 
             except Exception as e:
-                QMessageBox.critical(self, "错误", f"创建PPT时出错: {str(e)}\n{traceback.format_exc()}")
+                QMessageBox.critical(self, "错误", f"创建PPT时出错: {str(e)}")
 
     def show_about(self):
         """显示关于对话框"""
@@ -1550,13 +1851,13 @@ class WaferAnalysisApp(QMainWindow):
             <li>加载查询数据和条件数据（或使用模拟数据）</li>
             <li>处理数据后，在下拉菜单选择要分析的参数</li>
             <li>在箱形图或QQ图上，使用矩形选择或套索选择工具标记异常值</li>
-            <li>标记的点会以红色"X"显示，但原始数据不会被修改</li>
+            <li>点击"确认删除"按钮应用更改，从图表中移除选中的点</li>
             <li>可以导出Excel（保留原始数据）或创建PPT报告（排除标记的点）</li>
+            <li>使用"上一步"按钮可以撤销上一次操作</li>
         </ol>
         <p>&copy; 2023 晶圆测量分析工具</p>
         """
         QMessageBox.about(self, "关于", about_text)
-
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
