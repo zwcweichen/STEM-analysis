@@ -13,7 +13,7 @@ from matplotlib.path import Path
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout,
                            QWidget, QTableView, QHeaderView, QLabel, QComboBox, QFileDialog,
-                           QMessageBox, QSplitter, QTabWidget, QGroupBox)
+                           QMessageBox, QSplitter, QTabWidget, QGroupBox, QProgressDialog)
 from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex
 from PyQt6.QtGui import QAction
 from datetime import datetime
@@ -444,18 +444,86 @@ class WaferAnalysisApp(QMainWindow):
 
 
     def load_query_data(self):
-        """加载查询数据文件"""
+        """优化的数据加载函数，用于处理大型Excel文件"""
         file_name, _ = QFileDialog.getOpenFileName(
             self, "选择查询数据文件", "", "Excel Files (*.xlsx *.xls);;CSV Files (*.csv);;All Files (*)"
         )
         
         if file_name:
             try:
-                if file_name.endswith('.csv'):
-                    self.query_data = pd.read_csv(file_name)
-                else:
-                    self.query_data = pd.read_excel(file_name)
+                # 显示进度对话框
+                progress = QProgressDialog("正在加载数据...", "取消", 0, 100, self)
+                progress.setWindowModality(Qt.WindowModal)
+                progress.show()
                 
+                if file_name.endswith('.csv'):
+                    # 对于CSV文件，使用分块读取
+                    chunks = []
+                    chunksize = 10000  # 每次读取的行数
+                    total_size = sum(1 for _ in open(file_name, 'r')) - 1  # 减去表头
+                    
+                    for i, chunk in enumerate(pd.read_csv(file_name, chunksize=chunksize)):
+                        chunks.append(chunk)
+                        progress.setValue(min(100, int((i * chunksize) / total_size * 100)))
+                        QApplication.processEvents()  # 让UI响应
+                        if progress.wasCanceled():
+                            break
+                    
+                    self.query_data = pd.concat(chunks, ignore_index=True)
+                else:
+                    # 对于Excel文件，使用引擎和参数优化
+                    # 1. 使用openpyxl引擎，并跳过格式读取
+                    # 2. 只读取必要的列
+                    xl = pd.ExcelFile(file_name, engine='openpyxl')
+                    sheet_name = xl.sheet_names[0]  # 默认读取第一个工作表
+                    
+                    # 先读取表头
+                    headers = pd.read_excel(file_name, sheet_name=sheet_name, nrows=1)
+                    
+                    # 确定必要的列
+                    usecols = None  # 可以基于表头确定需要的列
+                    
+                    # 分块读取Excel
+                    chunks = []
+                    total_rows = 0  # 需要预先确定总行数
+                    try:
+                        # 尝试估计总行数
+                        import openpyxl
+                        wb = openpyxl.load_workbook(file_name, read_only=True)
+                        ws = wb[sheet_name]
+                        total_rows = ws.max_row
+                    except:
+                        total_rows = 100000  # 无法确定时使用默认值
+                    
+                    chunksize = 5000
+                    for i in range(0, total_rows, chunksize):
+                        # 设置进度
+                        progress.setValue(min(100, int(i / total_rows * 100)))
+                        QApplication.processEvents()
+                        
+                        if progress.wasCanceled():
+                            break
+                            
+                        # 读取数据块
+                        try:
+                            chunk = pd.read_excel(
+                                file_name, 
+                                sheet_name=sheet_name,
+                                skiprows=range(1, i+1),  # 跳过已读取的行
+                                nrows=chunksize,
+                                usecols=usecols
+                            )
+                            if not chunk.empty:
+                                chunks.append(chunk)
+                        except:
+                            break  # 读到文件末尾
+                    
+                    if chunks:
+                        self.query_data = pd.concat(chunks, ignore_index=True)
+                        # 确保列名正确
+                        self.query_data.columns = headers.columns
+                
+                progress.setValue(100)
                 QMessageBox.information(self, "成功", f"已加载查询数据: {file_name}")
             except Exception as e:
                 QMessageBox.critical(self, "错误", f"加载数据时出错: {str(e)}")
@@ -1322,48 +1390,111 @@ class WaferAnalysisApp(QMainWindow):
             QMessageBox.information(self, "提示", "Wafer散点图不支持交互式选择")
 
     def confirm_selection(self):
-        """确认删除当前选择的点"""
+        """优化的确认删除函数，提高大数据集处理速度"""
         if not self.temp_selected_points or self.current_parameter not in self.temp_selected_points:
             return
         
-        # 保存操作前的状态，用于上一步功能
-        if self.current_parameter in self.excluded_points:
-            prev_excluded = self.excluded_points[self.current_parameter].copy()
-        else:
-            prev_excluded = []
-        prev_display_data = self.display_data.copy()
-        self.operation_history.append((self.current_parameter, prev_excluded, prev_display_data))
-        self.undo_select_btn.setEnabled(True)
+        # 显示进度对话框
+        progress = QProgressDialog("正在处理选中的点...", "取消", 0, 100, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.show()
+        QApplication.processEvents()
         
-        # 更新排除点列表
-        if self.current_parameter not in self.excluded_points:
-            self.excluded_points[self.current_parameter] = []
-        
-        # 添加临时选择的点
-        for point in self.temp_selected_points[self.current_parameter]:
-            if point not in self.excluded_points[self.current_parameter]:
-                self.excluded_points[self.current_parameter].append(point)
-        
-        # 更新显示数据 - 从display_data中移除这些点
-        for condition, wafer_id, site_id in self.temp_selected_points[self.current_parameter]:
-            wafer_mask = self.display_data[self.wafer_id_col] == wafer_id
-            site_mask = self.display_data[self.site_col] == site_id
-            condition_mask = self.display_data[self.condition_col] == condition
-            self.display_data = self.display_data[~(wafer_mask & site_mask & condition_mask)]
-        
-        # 清除临时选择
-        self.temp_selected_points = {}
-        
-        # 更新图表和统计
-        self.update_plot()
-        self.update_stats_view()
-        
-        # 启用选择按钮
-        self.rect_select_btn.setEnabled(True)
-        self.lasso_select_btn.setEnabled(True)
-        
-        # 禁用确认按钮
-        self.confirm_select_btn.setEnabled(False)    
+        try:
+            # 保存操作前的状态，用于上一步功能
+            if self.current_parameter in self.excluded_points:
+                prev_excluded = self.excluded_points[self.current_parameter].copy()
+            else:
+                prev_excluded = []
+            prev_display_data = self.display_data.copy()
+            self.operation_history.append((self.current_parameter, prev_excluded, prev_display_data))
+            self.undo_select_btn.setEnabled(True)
+            
+            # 更新排除点列表
+            if self.current_parameter not in self.excluded_points:
+                self.excluded_points[self.current_parameter] = []
+            
+            # 添加临时选择的点
+            for point in self.temp_selected_points[self.current_parameter]:
+                if point not in self.excluded_points[self.current_parameter]:
+                    self.excluded_points[self.current_parameter].append(point)
+            
+            progress.setValue(25)
+            QApplication.processEvents()
+            
+            # 优化显示数据更新 - 一次性生成所有条件的掩码
+            # 而不是一个一个处理点
+            total_points = len(self.temp_selected_points[self.current_parameter])
+            
+            if total_points > 100:  # 当点数较多时使用优化方法
+                # 创建一个布尔掩码数组，初始为全真
+                mask = pd.Series([True] * len(self.display_data), index=self.display_data.index)
+                
+                # 根据条件分组处理
+                for condition in set(p[0] for p in self.temp_selected_points[self.current_parameter]):
+                    # 获取该条件下的所有wafer_id和site_id对
+                    points = [(w, s) for c, w, s in self.temp_selected_points[self.current_parameter] if c == condition]
+                    
+                    if points:
+                        # 首先过滤条件
+                        condition_mask = self.display_data[self.condition_col] == condition
+                        
+                        # 对该条件下的每个点，更新掩码
+                        for i, (wafer_id, site_id) in enumerate(points):
+                            # 更新进度
+                            if i % 20 == 0:  # 每20个点更新一次进度
+                                progress_val = 25 + min(50, int(50 * i / len(points)))
+                                progress.setValue(progress_val)
+                                QApplication.processEvents()
+                                
+                                if progress.wasCanceled():
+                                    break
+                            
+                            # 创建这个点的掩码
+                            wafer_mask = self.display_data[self.wafer_id_col] == wafer_id
+                            site_mask = self.display_data[self.site_col] == site_id
+                            point_mask = condition_mask & wafer_mask & site_mask
+                            
+                            # 更新总掩码
+                            mask = mask & ~point_mask
+                    
+                    if progress.wasCanceled():
+                        break
+                
+                # 应用掩码过滤数据
+                self.display_data = self.display_data[mask]
+            
+            else:  # 少量点时使用原来的方法
+                # 更新显示数据 - 从display_data中移除这些点
+                for condition, wafer_id, site_id in self.temp_selected_points[self.current_parameter]:
+                    wafer_mask = self.display_data[self.wafer_id_col] == wafer_id
+                    site_mask = self.display_data[self.site_col] == site_id
+                    condition_mask = self.display_data[self.condition_col] == condition
+                    self.display_data = self.display_data[~(wafer_mask & site_mask & condition_mask)]
+            
+            progress.setValue(75)
+            QApplication.processEvents()
+            
+            # 清除临时选择
+            self.temp_selected_points = {}
+            
+            # 更新图表和统计
+            self.update_plot()
+            self.update_stats_view()
+            
+            progress.setValue(100)
+            
+            # 启用选择按钮
+            self.rect_select_btn.setEnabled(True)
+            self.lasso_select_btn.setEnabled(True)
+            
+            # 禁用确认按钮
+            self.confirm_select_btn.setEnabled(False)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"处理选择时出错: {str(e)}\n{traceback.format_exc()}")
+        finally:
+            progress.close()  
 
     def on_box_selection(self, indices, line):
         """箱形图选择回调 - 优化版本"""
