@@ -453,7 +453,7 @@ class WaferAnalysisApp(QMainWindow):
             try:
                 # 显示进度对话框
                 progress = QProgressDialog("正在加载数据...", "取消", 0, 100, self)
-                progress.setWindowModality(Qt.WindowModal)
+                progress.setWindowModality(Qt.WindowModality.WindowModal)
                 progress.show()
                 
                 if file_name.endswith('.csv'):
