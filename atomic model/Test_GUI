@@ -16,10 +16,12 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout
                            QMessageBox, QSplitter, QTabWidget, QGroupBox)
 from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex
 from PyQt6.QtGui import QAction
-
+from datetime import datetime
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.enum.text import PP_ALIGN
+from pptx.dml.color import RGBColor
+
 
 
 # 用于在QTableView中显示pandas DataFrame的自定义模型
@@ -233,7 +235,9 @@ class WaferAnalysisApp(QMainWindow):
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
 
+    # 更新的主UI函数，添加wafer散点图面板(续)
     def setup_ui(self):
+        """设置UI布局 - 改进版本"""
         # 主布局
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -331,7 +335,7 @@ class WaferAnalysisApp(QMainWindow):
         plot_widget = QWidget()
         plot_layout = QVBoxLayout(plot_widget)
         
-        # 创建选项卡窗口用于Box Plot和QQ Plot
+        # 创建选项卡窗口用于不同图表
         tab_widget = QTabWidget()
         
         # Box Plot 选项卡
@@ -356,9 +360,21 @@ class WaferAnalysisApp(QMainWindow):
         qq_layout.addWidget(self.qq_toolbar)
         qq_layout.addWidget(self.qq_canvas)
         
+        # Wafer ID散点图选项卡 (新增)
+        self.wafer_tab = QWidget()
+        wafer_layout = QVBoxLayout(self.wafer_tab)
+        
+        self.wafer_fig = Figure(figsize=(5, 4), dpi=100)
+        self.wafer_canvas = FigureCanvas(self.wafer_fig)
+        self.wafer_toolbar = NavigationToolbar(self.wafer_canvas, self.wafer_tab)
+        
+        wafer_layout.addWidget(self.wafer_toolbar)
+        wafer_layout.addWidget(self.wafer_canvas)
+        
         # 添加选项卡
         tab_widget.addTab(self.box_tab, "箱形图")
         tab_widget.addTab(self.qq_tab, "Q-Q图")
+        tab_widget.addTab(self.wafer_tab, "Wafer散点图")  # 新增选项卡
         
         plot_layout.addWidget(tab_widget)
         
@@ -368,13 +384,13 @@ class WaferAnalysisApp(QMainWindow):
         
         self.rect_select_btn = QPushButton("矩形选择")
         self.lasso_select_btn = QPushButton("套索选择")
-        self.confirm_select_btn = QPushButton("确认删除")  # 新增确认删除按钮
+        self.confirm_select_btn = QPushButton("确认删除")
         self.clear_select_btn = QPushButton("清除选择")
         self.undo_select_btn = QPushButton("上一步")
         
         self.rect_select_btn.clicked.connect(lambda: self.enable_selection_mode('rectangle'))
         self.lasso_select_btn.clicked.connect(lambda: self.enable_selection_mode('lasso'))
-        self.confirm_select_btn.clicked.connect(self.confirm_selection)  # 连接确认删除功能
+        self.confirm_select_btn.clicked.connect(self.confirm_selection)
         self.clear_select_btn.clicked.connect(self.clear_selection)
         self.undo_select_btn.clicked.connect(self.undo_selection)
         
@@ -404,6 +420,27 @@ class WaferAnalysisApp(QMainWindow):
         self.confirm_select_btn.setEnabled(False)  # 初始状态禁用确认按钮
         self.clear_select_btn.setEnabled(False)
         self.undo_select_btn.setEnabled(False)
+
+    # 更新图表的函数
+    def update_plot(self, mark_only=False):
+        """更新所有图表"""
+        if self.transformed_data is None or self.current_parameter is None:
+            return
+            
+        # 如果是首次加载或切换参数且不是仅标记模式，创建显示数据副本
+        if (self.display_data is None or self.current_parameter not in self.excluded_points) and not mark_only:
+            self.display_data = self.transformed_data.copy()
+        
+        # 更新箱形图
+        self.update_box_plot(mark_only)
+        
+        # 更新QQ图
+        self.update_qq_plot(mark_only)
+        
+        # 更新Wafer散点图 (新增)
+        if not mark_only:  # 仅在非标记模式下更新
+            self.update_wafer_scatter_plot(self.wafer_fig, self.current_parameter)
+            self.wafer_canvas.draw()
 
 
     def load_query_data(self):
@@ -502,7 +539,7 @@ class WaferAnalysisApp(QMainWindow):
             QMessageBox.critical(self, "错误", f"处理数据时出错: {str(e)}\n{traceback.format_exc()}")
 
     def transform_data(self):
-        """转换数据，合并查询数据和条件数据，保留Site ID信息"""
+        """转换数据，合并查询数据和条件数据，保留Site ID和添加WAT Date信息"""
         try:
             # 查找查询数据中的Wafer ID列
             wafer_id_query = "Wafer ID" if "Wafer ID" in self.query_data.columns else "WaferID"
@@ -526,6 +563,7 @@ class WaferAnalysisApp(QMainWindow):
             parameter_col = None
             value_col = None
             site_col = None
+            date_col = None  # 添加日期列
             
             for col in self.query_data.columns:
                 if "parameter name" in col.lower() or "name" in col.lower():
@@ -534,6 +572,8 @@ class WaferAnalysisApp(QMainWindow):
                     value_col = col
                 elif "site" in col.lower() and "value" not in col.lower():
                     site_col = col
+                elif "date" in col.lower() or "time" in col.lower():
+                    date_col = col
             
             # 查找条件列
             condition_col = None
@@ -562,13 +602,46 @@ class WaferAnalysisApp(QMainWindow):
                 right_on=wafer_id_condition,
             )
             
+            # 处理和规范化日期信息
+            if date_col and date_col in merged_data.columns:
+                # 尝试转换日期格式
+                try:
+                    merged_data['WAT_Date'] = pd.to_datetime(merged_data[date_col])
+                    merged_data['WAT_Date'] = merged_data['WAT_Date'].dt.strftime('%Y-%m-%d')
+                except:
+                    # 如果无法转换，创建一个虚拟日期列
+                    print("无法转换日期列，创建虚拟WAT_Date")
+                    # 根据Wafer ID分组创建虚拟日期
+                    unique_wafers = merged_data[wafer_id_query].unique()
+                    wafer_dates = {}
+                    base_date = datetime.now()
+                    
+                    for i, wafer_id in enumerate(unique_wafers):
+                        # 为每个Wafer ID分配一个不同的日期，向前推几天
+                        wafer_dates[wafer_id] = (base_date - pd.Timedelta(days=i)).strftime('%Y-%m-%d')
+                    
+                    merged_data['WAT_Date'] = merged_data[wafer_id_query].map(wafer_dates)
+            else:
+                # 如果没有日期列，创建一个虚拟日期列
+                print("未找到日期列，创建虚拟WAT_Date")
+                # 根据Wafer ID分组创建虚拟日期
+                unique_wafers = merged_data[wafer_id_query].unique()
+                wafer_dates = {}
+                base_date = datetime.now()
+                
+                for i, wafer_id in enumerate(unique_wafers):
+                    # 为每个Wafer ID分配一个不同的日期，向前推几天
+                    wafer_dates[wafer_id] = (base_date - pd.Timedelta(days=i)).strftime('%Y-%m-%d')
+                
+                merged_data['WAT_Date'] = merged_data[wafer_id_query].map(wafer_dates)
+            
             # 使用Site ID创建透视表
             try:
-                # 准备包含Site ID的数据转换
+                # 准备包含Site ID和WAT Date的数据转换
                 if site_col:
                     # 使用Site ID进行透视
                     pivot_data = merged_data.pivot_table(
-                        index=[wafer_id_query, site_col, condition_col],
+                        index=[wafer_id_query, site_col, condition_col, 'WAT_Date'],
                         columns=parameter_col,
                         values=value_col,
                     ).reset_index()
@@ -578,7 +651,7 @@ class WaferAnalysisApp(QMainWindow):
                     site_col = 'Site_ID'
                     
                     pivot_data = merged_data.pivot_table(
-                        index=[wafer_id_query, site_col, condition_col],
+                        index=[wafer_id_query, site_col, condition_col, 'WAT_Date'],
                         columns=parameter_col,
                         values=value_col,
                         aggfunc='first'
@@ -592,7 +665,7 @@ class WaferAnalysisApp(QMainWindow):
                 print(f"创建数据透视表时出错: {e}")
                 
                 # 备用方法 - 不使用透视表，直接重塑数据
-                transformed_data = merged_data[[wafer_id_query, condition_col]].drop_duplicates()
+                transformed_data = merged_data[[wafer_id_query, condition_col, 'WAT_Date']].drop_duplicates()
                 
                 if site_col:
                     site_data = merged_data[[wafer_id_query, site_col]].drop_duplicates()
@@ -618,8 +691,9 @@ class WaferAnalysisApp(QMainWindow):
             print(f"转换数据时出错: {e}")
             return None, None, None, None, None, None
 
+    # 创建测试数据集（增强版本 - 包含日期信息）
     def create_sample_data(self):
-        """创建模拟数据集，包含Site ID信息"""
+        """创建更真实的模拟数据集，包含Site ID和WAT Date信息"""
         n_wafers = 30
         
         # 创建wafer IDs
@@ -628,33 +702,78 @@ class WaferAnalysisApp(QMainWindow):
         # 条件类型
         condition_types = ['Baseline', '2nd tool']
         
-        # 创建condition_list数据
+        # 创建WAT日期 - 每3个wafer使用相同的日期
+        base_date = datetime.now()
+        wafer_dates = {}
+        
+        for i, wafer_id in enumerate(wafer_ids):
+            day_offset = i // 3  # 每3个wafer使用相同的日期
+            wafer_dates[wafer_id] = (base_date - pd.Timedelta(days=day_offset)).strftime('%Y-%m-%d')
+        
+        # 创建条件数据
         condition_data = pd.DataFrame({
             'WaferID': wafer_ids,
-            'Condition': np.random.choice(condition_types, size=n_wafers)
+            'Condition': np.random.choice(condition_types, size=n_wafers),
+            'WAT_Date': [wafer_dates[wid] for wid in wafer_ids]
         })
         
-        # 创建量测数据
-        param_names = ['Con_M3LA', 'Con_M3LB', 'Rc_V2v', 'LK_M3LA', 'LK_M3LB']
+        # 参数名称和典型值范围
+        param_specs = {
+            'Con_M3LA': (1.5, 2.5),  # 电容参数 - 单位为pF
+            'Con_M3LB': (1.5, 2.5),
+            'Rc_V2v': (50, 60),     # 电阻参数 - 单位为ohm
+            'LK_M3LA': (1e-13, 5e-13),  # 漏电流参数 - 非常小的值
+            'LK_M3LB': (1e-13, 5e-13)
+        }
         
+        # 创建量测数据
         rows = []
+        
         for wafer_id in wafer_ids:
-            for param in param_names:
+            condition = condition_data[condition_data['WaferID'] == wafer_id]['Condition'].values[0]
+            wat_date = wafer_dates[wafer_id]
+            
+            for param_name, (min_val, max_val) in param_specs.items():
                 # 为每个wafer和每个参数创建多个site测量
-                n_sites = np.random.randint(1, 5)
+                n_sites = np.random.randint(3, 6)  # 每个wafer有3-5个测量site
+                
+                # 根据条件微调基准值
+                if condition == 'Baseline':
+                    base_adjustment = 1.0
+                else:
+                    # 2nd tool有轻微的偏移
+                    if 'Con' in param_name:
+                        base_adjustment = np.random.uniform(0.95, 1.05)
+                    elif 'Rc' in param_name:
+                        base_adjustment = np.random.uniform(0.97, 1.03)
+                    else:  # LK参数
+                        base_adjustment = np.random.uniform(0.9, 1.1)
+                
                 for site in range(1, n_sites+1):
-                    # 随机生成0-9之间的值，添加少量异常值
-                    value = np.random.uniform(0, 9)
+                    # 根据参数类型设置基准值
+                    base_value = np.random.uniform(min_val, max_val) * base_adjustment
+                    
+                    # 添加一些随机变异
+                    if 'LK' in param_name:  # 漏电流参数有更大的随机性
+                        variation = np.random.uniform(0.7, 1.3)
+                    else:
+                        variation = np.random.uniform(0.95, 1.05)
+                    
+                    value = base_value * variation
                     
                     # 5%的概率生成异常值
                     if np.random.random() < 0.05:
-                        value = value * (3 + np.random.random() * 2)  # 3-5倍的异常值
+                        if 'LK' in param_name:
+                            value = value * np.random.uniform(3, 10)  # 漏电流异常更明显
+                        else:
+                            value = value * np.random.uniform(2, 4)
                     
                     rows.append({
                         'Wafer ID': wafer_id,
-                        'Parameter Name': param,
+                        'Parameter Name': param_name,
                         'Site': f'Site_{site}',
-                        'Site Value': value
+                        'Site Value': value,
+                        'WAT_Date': wat_date
                     })
         
         query_data = pd.DataFrame(rows)
@@ -716,11 +835,13 @@ class WaferAnalysisApp(QMainWindow):
                 mean_value = np.mean(group_data)
                 # 计算标准差
                 std_dev = np.std(group_data, ddof=1)
+                # 计算样本数量
+                sample_count = len(group_data)
                 
                 stats_dict[group] = {
                     'Mean': mean_value,
                     'Std Dev': std_dev,
-                    'Count': len(group_data)
+                    'Count': sample_count
                 }
             else:
                 stats_dict[group] = {
@@ -729,39 +850,83 @@ class WaferAnalysisApp(QMainWindow):
                     'Count': 0
                 }
         
+        # 找出基准组和测试组
+        baseline_group = None
+        second_tool_group = None
+        
+        # 首先尝试通过名称识别基准组
+        for group in group_values:
+            if 'base' in group.lower() or 'baseline' in group.lower() or 'bsl' in group.lower():
+                baseline_group = group
+                break
+        
+        # 如果没找到基准组，默认使用第一个组
+        if baseline_group is None and len(group_values) > 0:
+            baseline_group = group_values[0]
+        
+        # 识别测试组（非基准组）
+        for group in group_values:
+            if group != baseline_group:
+                second_tool_group = group
+                break
+        
         # 计算K-shift (如果有两个或更多组)
-        if len(group_values) >= 2:
-            for group in group_values:
-                if 'base' in group.lower():
-                    baseline_group = group
-                else:
-                    second_tool_group = group 
-            
+        if len(group_values) >= 2 and baseline_group and second_tool_group:
             if (baseline_group in stats_dict and second_tool_group in stats_dict and
                 not np.isnan(stats_dict[baseline_group]['Std Dev']) and
                 stats_dict[baseline_group]['Std Dev'] != 0):
                 
-                stats_dict[second_tool_group]['K-shift'] = (
+                # 计算K-shift
+                k_shift = (
                     stats_dict[second_tool_group]['Mean'] - stats_dict[baseline_group]['Mean']
                 ) / stats_dict[baseline_group]['Std Dev']
+                
+                stats_dict[second_tool_group]['K-shift'] = k_shift
             else:
                 if second_tool_group in stats_dict:
                     stats_dict[second_tool_group]['K-shift'] = np.nan
         
-        return stats_dict
+        return stats_dict, baseline_group, second_tool_group
+
+    # 添加功能：检查所有K-shift是否都小于1.5
+    def check_all_kshift_less_than_threshold(self, threshold=1.5):
+        """检查所有参数的K-shift是否都小于阈值"""
+        all_within_threshold = True
+        k_shift_values = {}
+        
+        for parameter in self.available_parameters:
+            stats_dict, baseline_group, second_tool_group = self.calculate_statistics(
+                parameter,
+                self.condition_col,
+                self.condition_types,
+                self.excluded_points
+            )
+            
+            if second_tool_group in stats_dict and 'K-shift' in stats_dict[second_tool_group]:
+                k_shift = stats_dict[second_tool_group]['K-shift']
+                k_shift_values[parameter] = k_shift
+                
+                if not np.isnan(k_shift) and abs(k_shift) >= threshold:
+                    all_within_threshold = False
+        
+        return all_within_threshold, k_shift_values    
+
 
     def update_stats_view(self):
         """更新统计信息表格"""
         if self.transformed_data is None or self.current_parameter is None:
             return
-            
-        # 计算统计信息
-        stats_dict = self.calculate_statistics(
+                
+        # 计算统计信息 - 注意这里现在返回的是一个元组
+        stats_result = self.calculate_statistics(
             self.current_parameter,
             self.condition_col,
             self.condition_types,
             self.excluded_points
         )
+        
+        # 解包返回值
+        stats_dict, baseline_group, second_tool_group = stats_result
         
         # 创建统计信息DataFrame
         stats_rows = []
@@ -788,6 +953,7 @@ class WaferAnalysisApp(QMainWindow):
         for i in range(self.stats_model.columnCount()):
             header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
 
+    # 增强的参数更改函数
     def on_parameter_changed(self, index):
         """当参数选择改变时调用"""
         if index >= 0 and index < len(self.available_parameters):
@@ -795,24 +961,98 @@ class WaferAnalysisApp(QMainWindow):
             # 清除临时选择的点
             self.temp_selected_points = {}
             self.confirm_select_btn.setEnabled(False)
-            self.update_plot()
-            self.update_stats_view()  # 更新统计视图
-
-    def update_plot(self, mark_only=False):
-        """更新图表"""
-        if self.transformed_data is None or self.current_parameter is None:
-            return
             
-        # 如果是首次加载或切换参数且不是仅标记模式，创建显示数据副本
-        if (self.display_data is None or self.current_parameter not in self.excluded_points) and not mark_only:
-            self.display_data = self.transformed_data.copy()
-        
-        # 更新箱形图
-        self.update_box_plot(mark_only)
-        
-        # 更新QQ图
-        self.update_qq_plot(mark_only)
+            # 更新图表
+            self.update_plot()
+            
+            # 更新统计视图
+            self.update_stats_view()
+            
+            # 更新结果摘要 (如果要添加此功能)
+            self.check_all_kshift_less_than_threshold()
 
+
+    # 更新的Wafer ID散点图函数（续）
+    def update_wafer_scatter_plot(self, figure, parameter):
+        """创建按Wafer ID的散点图，按WAT Date分组"""
+        # 清除当前图表
+        figure.clear()
+        ax = figure.add_subplot(111)
+        
+        if self.transformed_data is None or parameter is None:
+            ax.text(0.5, 0.5, "无数据可用", ha='center', va='center', transform=ax.transAxes)
+            return
+        
+        # 获取数据
+        data = self.display_data.copy()
+        
+        # 按WAT_Date分组
+        unique_dates = sorted(data['WAT_Date'].unique())
+        
+        # 颜色映射
+        colors = plt.cm.tab10.colors
+        
+        # 按日期和条件绘制散点图
+        for date_idx, date in enumerate(unique_dates):
+            date_mask = data['WAT_Date'] == date
+            date_color = colors[date_idx % len(colors)]
+            
+            for group_idx, group in enumerate(self.condition_types):
+                group_mask = data[self.condition_col] == group
+                
+                # 获取符合条件的数据
+                plot_data = data[date_mask & group_mask]
+                
+                if len(plot_data) > 0:
+                    # 获取唯一的wafer ids
+                    wafer_ids = plot_data[self.wafer_id_col].unique()
+                    
+                    # 为每个wafer id创建x坐标
+                    x_coords = []
+                    y_values = []
+                    
+                    for i, wafer_id in enumerate(wafer_ids):
+                        wafer_mask = plot_data[self.wafer_id_col] == wafer_id
+                        wafer_data = plot_data[wafer_mask]
+                        
+                        # 为每个wafer添加所有site的数据点
+                        for _, row in wafer_data.iterrows():
+                            x_coords.append(i + (0.1 if group == 'Baseline' else -0.1))  # 微调x位置以区分组
+                            y_values.append(row[parameter])
+                    
+                    # 绘制散点图
+                    marker = 'o' if group == 'Baseline' else 's'
+                    ax.scatter(
+                        x_coords,
+                        y_values,
+                        color=date_color,
+                        marker=marker,
+                        s=30,  # 点的大小
+                        alpha=0.7,
+                        label=f"{date} - {group}" if date_idx * len(self.condition_types) + group_idx < 10 else None  # 限制图例项数
+                    )
+        
+        # 添加标题和标签
+        ax.set_title(f'{parameter} by Wafer ID', fontsize=10)
+        ax.set_xlabel('Wafer Index', fontsize=8)
+        ax.set_ylabel(parameter, fontsize=8)
+        
+        # 添加网格线
+        ax.grid(True, alpha=0.3)
+        
+        # 添加图例（如果有多组数据）
+        if len(unique_dates) > 0:
+            ax.legend(loc='best', fontsize=8)
+        
+        # 适应坐标轴范围
+        ax.margins(0.1)
+        
+        # 刷新画布
+        figure.tight_layout()
+
+
+
+    # 修改后的更新箱形图函数
     def update_box_plot(self, mark_only=False):
         """更新箱形图"""
         # 清除当前图表
@@ -904,6 +1144,25 @@ class WaferAnalysisApp(QMainWindow):
             if excluded_data:
                 x_positions, y_values = zip(*excluded_data)
                 ax.scatter(x_positions, y_values, color='red', marker='x', s=100, alpha=0.7)
+        
+        # 添加一个k-shift值的注释
+        if len(labels) >= 2:
+            stats_dict, baseline_group, second_tool_group = self.calculate_statistics(
+                self.current_parameter, 
+                self.condition_col, 
+                ordered_groups, 
+                self.excluded_points
+            )
+            
+            if second_tool_group in stats_dict and 'K-shift' in stats_dict[second_tool_group]:
+                k_shift = stats_dict[second_tool_group]['K-shift']
+                if not np.isnan(k_shift):
+                    # 在图表右上角添加K-shift值
+                    k_shift_text = f'K-shift: {k_shift:.3f}'
+                    # 设置颜色
+                    color = 'green' if abs(k_shift) < 1.5 else 'red'
+                    ax.annotate(k_shift_text, xy=(0.95, 0.95), xycoords='axes fraction', 
+                            ha='right', va='top', fontsize=10, color=color)
         
         # 刷新画布
         self.box_canvas.draw()
@@ -1038,6 +1297,7 @@ class WaferAnalysisApp(QMainWindow):
         # 刷新画布
         self.qq_canvas.draw()
 
+    # 更新的图表选择功能
     def enable_selection_mode(self, mode):
         """启用选择模式"""
         # 禁用其他按钮，避免同时激活多个选择模式
@@ -1052,8 +1312,14 @@ class WaferAnalysisApp(QMainWindow):
         
         if current_tab_index == 0:  # Box Plot
             self.box_canvas.enable_selection(mode, self.on_box_selection)
-        else:  # QQ Plot
+        elif current_tab_index == 1:  # QQ Plot
             self.qq_canvas.enable_selection(mode, self.on_qq_selection)
+        elif current_tab_index == 2:  # Wafer散点图
+            # 对于Wafer散点图，我们不提供交互式选择
+            # 重新启用选择按钮
+            self.rect_select_btn.setEnabled(True)
+            self.lasso_select_btn.setEnabled(True)
+            QMessageBox.information(self, "提示", "Wafer散点图不支持交互式选择")
 
     def confirm_selection(self):
         """确认删除当前选择的点"""
@@ -1100,16 +1366,13 @@ class WaferAnalysisApp(QMainWindow):
         self.confirm_select_btn.setEnabled(False)    
 
     def on_box_selection(self, indices, line):
-        """箱形图选择回调"""
+        """箱形图选择回调 - 优化版本"""
         if not indices.size:
             return
             
         try:
             # 启用确认按钮
             self.confirm_select_btn.setEnabled(True)
-            
-            # 获取当前活跃的选项卡
-            tab_widget = self.findChild(QTabWidget)
             
             # 确保Baseline总是第一个，2nd tool总是第二个
             ordered_groups = []
@@ -1122,66 +1385,65 @@ class WaferAnalysisApp(QMainWindow):
                 if group not in ordered_groups:
                     ordered_groups.append(group)
             
-            # 获取箱线图标签
-            tick_labels = self.box_fig.axes[0].get_xticklabels()
-            box_lines = self.box_fig.axes[0].lines
+            # 获取当前图形的所有艺术对象
+            all_objects = self.box_fig.axes[0].get_children()
             
-            # 找出所有箱线图中的线条和点
-            line_index = -1
-            for i, l in enumerate(box_lines):
-                if l == line:
-                    line_index = i
-                    break
+            # 确定用户点击的x坐标 (对应的条件组)
+            x_coords = line.get_xdata()[indices]
+            y_coords = line.get_ydata()[indices]
             
-            # 如果找不到对应的线，可能是点击了散点图的点
-            if line_index < 0:
-                for i, art in enumerate(self.box_fig.axes[0].collections):
-                    if line == art:
-                        line_index = i
-                        break
+            # 确定x坐标对应的组索引
+            group_indices = []
+            for x in x_coords:
+                # 箱形图每个分组的x坐标是整数
+                # 四舍五入到最近的整数，然后减1得到索引
+                group_idx = round(x) - 1
+                if 0 <= group_idx < len(ordered_groups):
+                    group_indices.append(group_idx)
             
-            # 还是找不到，尝试更广泛的查找
-            if line_index < 0:
-                # 检查位置来确定是哪个箱体
-                x_pos = np.mean(line.get_xdata())
-                line_index = int(x_pos) - 1
-                
-                if line_index < 0 or line_index >= len(ordered_groups):
-                    QMessageBox.warning(self, "警告", "无法确定选择的组")
-                    return
+            # 如果找不到有效的组索引，尝试从线对象猜测
+            if not group_indices:
+                # 尝试获取线对象的x坐标的平均值
+                x_mean = np.mean(line.get_xdata())
+                group_idx = round(x_mean) - 1
+                if 0 <= group_idx < len(ordered_groups):
+                    group_indices = [group_idx]
             
-            # 确保索引在范围内
-            if len(tick_labels) > 0 and line_index < len(tick_labels):
-                group = tick_labels[line_index].get_text()
-            else:
-                group = ordered_groups[min(line_index, len(ordered_groups)-1)]
-            
-            # 获取所选组在当前显示数据中的所有点
-            mask = self.display_data[self.condition_col] == group
-            # 获取y坐标的所有点
-            y_vals = line.get_ydata()[indices]
-            
-            # 找出与这些坐标接近的点
-            selected_points = []  # 存储格式为 (group, wafer_id, site_id)
-            for y_val in y_vals:
-                # 找出接近这个y值的点
-                group_data = self.display_data.loc[mask]
-                # 计算与y值的距离
-                distances = np.abs(group_data[self.current_parameter] - y_val)
-                # 找出最接近的点
-                if len(distances) > 0:
-                    closest_idx = distances.nsmallest(1).index
-                    if len(closest_idx) > 0:
-                        # 获取对应的wafer ID和site ID
-                        wafer_id = self.display_data.loc[closest_idx, self.wafer_id_col].values[0]
-                        site_id = self.display_data.loc[closest_idx, self.site_col].values[0]
-                        selected_points.append((group, wafer_id, site_id))
-            
-            if not selected_points:
-                # 重新启用选择按钮
+            # 如果还找不到有效的组，报告错误并返回
+            if not group_indices:
                 self.rect_select_btn.setEnabled(True)
                 self.lasso_select_btn.setEnabled(True)
-                QMessageBox.warning(self, "警告", "未能找到匹配的数据点")
+                QMessageBox.warning(self, "警告", "无法确定选择的组，请尝试在箱形图主体上选择")
+                return
+            
+            # 获取y坐标范围
+            y_min = min(y_coords)
+            y_max = max(y_coords)
+            
+            # 准备选择的点
+            selected_points = []  # 存储格式为 (group, wafer_id, site_id)
+            
+            # 处理每个识别的组
+            for group_idx in group_indices:
+                group = ordered_groups[group_idx]
+                
+                # 获取该组在当前显示数据中的所有点
+                mask = self.display_data[self.condition_col] == group
+                group_data = self.display_data.loc[mask].copy()
+                
+                # 筛选y坐标范围内的点
+                value_mask = (group_data[self.current_parameter] >= y_min) & (group_data[self.current_parameter] <= y_max)
+                matched_data = group_data[value_mask]
+                
+                # 找出这些数据点对应的wafer ID和site ID
+                for idx, row in matched_data.iterrows():
+                    selected_points.append((group, row[self.wafer_id_col], row[self.site_col]))
+            
+            # 如果没有找到点，重新启用按钮并提示用户
+            if not selected_points:
+                self.rect_select_btn.setEnabled(True)
+                self.lasso_select_btn.setEnabled(True)
+                QMessageBox.warning(self, "警告", "所选区域内未找到数据点")
                 return
             
             # 更新临时选择点列表
@@ -1200,10 +1462,10 @@ class WaferAnalysisApp(QMainWindow):
             # 重新启用选择按钮
             self.rect_select_btn.setEnabled(True)
             self.lasso_select_btn.setEnabled(True)
-            QMessageBox.warning(self, "警告", f"处理选择时出错: {str(e)}")
+            QMessageBox.warning(self, "警告", f"处理选择时出错: {str(e)}\n{traceback.format_exc()}")
 
     def on_qq_selection(self, indices, line):
-        """QQ图选择回调"""
+        """QQ图选择回调 - 优化版本"""
         if not indices.size:
             return
             
@@ -1221,68 +1483,75 @@ class WaferAnalysisApp(QMainWindow):
                 if group not in ordered_groups:
                     ordered_groups.append(group)
             
-            # 找出属于哪个组
-            qq_lines = self.qq_fig.axes[0].get_lines()
-            line_index = -1
-            for i, l in enumerate(qq_lines):
-                if l == line:
-                    line_index = i
+            # 找出所选线条对应的组
+            line_color = line.get_color()
+            line_marker = line.get_marker()
+            
+            # 遍历所有线条，找出匹配的组
+            matching_group = None
+            for group in ordered_groups:
+                # 根据上下文中的color_map和marker_map判断
+                expected_color = 'blue' if group == 'Baseline' else 'green' if group == '2nd tool' else 'gray'
+                expected_marker = 'o' if group == 'Baseline' else 's' if group == '2nd tool' else '^'
+                
+                if (line_color == expected_color and line_marker == expected_marker) or \
+                (expected_color in line_color):  # 颜色可能是hex或RGB格式
+                    matching_group = group
                     break
             
-            # 如果找不到，尝试通过坐标判断是哪个组的线
-            if line_index < 0:
-                x_coords = line.get_xdata()[indices]
-                y_coords = line.get_ydata()[indices]
+            # 如果无法通过颜色和标记确定组，使用散点图上下文和坐标判断
+            if not matching_group:
+                # 通过用户选择的x值范围在图上进行区域查询
+                x_vals = line.get_xdata()[indices]
+                x_min, x_max = min(x_vals), max(x_vals)
+                y_vals = line.get_ydata()[indices]
+                y_min, y_max = min(y_vals), max(y_vals)
                 
-                # 对于每个组，检查其线是否包含接近的点
-                for i, l in enumerate(qq_lines):
-                    l_xdata = l.get_xdata()
-                    l_ydata = l.get_ydata()
+                # 查找所有组的数据散点
+                group_matches = {}
+                for group in ordered_groups:
+                    mask = self.display_data[self.condition_col] == group
+                    group_data = self.display_data.loc[mask, self.current_parameter].dropna()
                     
-                    # 找出最接近的点
-                    min_dist = float('inf')
-                    for x, y in zip(x_coords, y_coords):
-                        dists = np.sqrt((l_xdata - x)**2 + (l_ydata - y)**2)
-                        nearest_dist = np.min(dists) if len(dists) > 0 else float('inf')
-                        if nearest_dist < min_dist:
-                            min_dist = nearest_dist
-                            line_index = i
+                    if len(group_data) == 0:
+                        continue
+                    
+                    # 计算与选择区域重叠的点的数量
+                    in_range = ((group_data >= x_min) & (group_data <= x_max)).sum()
+                    group_matches[group] = in_range
+                
+                # 选择重叠点最多的组
+                if group_matches:
+                    matching_group = max(group_matches, key=group_matches.get)
             
-            # 找出对应的组
-            if line_index < 0 or line_index >= len(ordered_groups):
-                # 重新启用选择按钮
+            if not matching_group:
                 self.rect_select_btn.setEnabled(True)
                 self.lasso_select_btn.setEnabled(True)
-                QMessageBox.warning(self, "警告", "无法确定选择的组")
+                QMessageBox.warning(self, "警告", "无法确定选择的组，请尝试选择更明确的区域")
                 return
             
-            group = ordered_groups[line_index]
-            
-            # 获取所选点的x值（实际测量值）
+            # 获取所选点的x值范围（实际测量值）
             x_vals = line.get_xdata()[indices]
+            x_min, x_max = min(x_vals), max(x_vals)
             
-            # 找出对应的晶圆
+            # 找出对应的晶圆和site数据点
             selected_points = []  # 存储格式为 (group, wafer_id, site_id)
-            mask = self.display_data[self.condition_col] == group
-            group_data = self.display_data[mask]
+            mask = self.display_data[self.condition_col] == matching_group
+            group_data = self.display_data[mask].copy()
             
-            for x_val in x_vals:
-                # 找出接近这个x值的点
-                distances = np.abs(group_data[self.current_parameter] - x_val)
-                if len(distances) > 0:
-                    # 找出最接近的点
-                    closest_idx = distances.nsmallest(1).index
-                    if len(closest_idx) > 0:
-                        # 获取对应的wafer ID和site ID
-                        wafer_id = self.display_data.loc[closest_idx, self.wafer_id_col].values[0]
-                        site_id = self.display_data.loc[closest_idx, self.site_col].values[0]
-                        selected_points.append((group, wafer_id, site_id))
+            # 筛选x坐标（参数值）在范围内的点
+            value_mask = (group_data[self.current_parameter] >= x_min) & (group_data[self.current_parameter] <= x_max)
+            matched_data = group_data[value_mask]
+            
+            # 找出这些数据点对应的wafer ID和site ID
+            for idx, row in matched_data.iterrows():
+                selected_points.append((matching_group, row[self.wafer_id_col], row[self.site_col]))
             
             if not selected_points:
                 # 重新启用选择按钮
                 self.rect_select_btn.setEnabled(True)
                 self.lasso_select_btn.setEnabled(True)
-                QMessageBox.warning(self, "警告", "未能找到匹配的数据点")
+                QMessageBox.warning(self, "警告", "所选区域内未找到匹配的数据点")
                 return
             
             # 更新临时选择点列表
@@ -1301,7 +1570,7 @@ class WaferAnalysisApp(QMainWindow):
             # 重新启用选择按钮
             self.rect_select_btn.setEnabled(True)
             self.lasso_select_btn.setEnabled(True)
-            QMessageBox.warning(self, "警告", f"处理选择时出错: {str(e)}")
+            QMessageBox.warning(self, "警告", f"处理选择时出错: {str(e)}\n{traceback.format_exc()}")
 
     def clear_selection(self):
         """清除当前参数的选择"""
@@ -1403,26 +1672,106 @@ class WaferAnalysisApp(QMainWindow):
         self.rect_select_btn.setEnabled(True)
         self.lasso_select_btn.setEnabled(True)   
 
+    # 导出增强版本的Excel文件
     def export_excel(self):
-        """导出Excel，保留原始数据"""
+        """导出Excel，保留原始数据和统计信息"""
         if self.transformed_data is None:
             QMessageBox.warning(self, "警告", "没有可导出的数据")
             return
             
         file_name, _ = QFileDialog.getSaveFileName(
-            self, "导出Excel", "Wafer_Measurement_Data.xlsx", "Excel Files (*.xlsx)"
+            self, "导出Excel", "Wafer_Measurement_Analysis.xlsx", "Excel Files (*.xlsx)"
         )
         
         if file_name:
             try:
-                # 直接导出原始数据表格，简化处理
-                self.transformed_data.to_excel(file_name, index=False)
-                QMessageBox.information(self, "成功", f"原始数据已导出到: {file_name}")
+                # 创建Excel写入器
+                with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
+                    # 导出原始数据
+                    self.transformed_data.to_excel(writer, sheet_name='Raw Data', index=False)
+                    
+                    # 导出统计结果
+                    stats_rows = []
+                    param_kshifts = {}
+                    
+                    for parameter in self.available_parameters:
+                        stats_dict, baseline_group, second_tool_group = self.calculate_statistics(
+                            parameter, 
+                            self.condition_col, 
+                            self.condition_types, 
+                            self.excluded_points
+                        )
+                        
+                        # 记录K-shift值
+                        if second_tool_group in stats_dict and 'K-shift' in stats_dict[second_tool_group]:
+                            k_shift = stats_dict[second_tool_group]['K-shift']
+                            param_kshifts[parameter] = k_shift
+                        
+                        # 添加基线组统计信息
+                        if baseline_group in stats_dict:
+                            baseline_stats = stats_dict[baseline_group]
+                            stats_rows.append({
+                                'Parameter': parameter,
+                                'Condition': baseline_group,
+                                'Mean': baseline_stats.get('Mean', np.nan),
+                                'Std Dev': baseline_stats.get('Std Dev', np.nan),
+                                'Count': baseline_stats.get('Count', 0),
+                                'K-shift': np.nan
+                            })
+                        
+                        # 添加对照组统计信息
+                        if second_tool_group in stats_dict:
+                            second_tool_stats = stats_dict[second_tool_group]
+                            stats_rows.append({
+                                'Parameter': parameter,
+                                'Condition': second_tool_group,
+                                'Mean': second_tool_stats.get('Mean', np.nan),
+                                'Std Dev': second_tool_stats.get('Std Dev', np.nan),
+                                'Count': second_tool_stats.get('Count', 0),
+                                'K-shift': second_tool_stats.get('K-shift', np.nan)
+                            })
+                    
+                    # 创建统计数据表
+                    stats_df = pd.DataFrame(stats_rows)
+                    stats_df.to_excel(writer, sheet_name='Statistics', index=False)
+                    
+                    # 创建K-shift摘要
+                    k_shift_summary = []
+                    all_within_threshold = True
+                    
+                    for param, k_shift in param_kshifts.items():
+                        within_threshold = np.isnan(k_shift) or abs(k_shift) < 1.5
+                        if not within_threshold:
+                            all_within_threshold = False
+                        
+                        k_shift_summary.append({
+                            'Parameter': param,
+                            'K-shift': k_shift,
+                            'Within Threshold': 'Yes' if within_threshold else 'No'
+                        })
+                    
+                    k_shift_df = pd.DataFrame(k_shift_summary)
+                    k_shift_df.to_excel(writer, sheet_name='K-shift Summary', index=False)
+                    
+                    # 创建一个总结页
+                    summary_data = {
+                        'Item': ['Total Wafers', 'Total Parameters', 'All K-shifts within threshold'],
+                        'Value': [
+                            len(self.transformed_data[self.wafer_id_col].unique()), 
+                            len(self.available_parameters),
+                            'Yes' if all_within_threshold else 'No'
+                        ]
+                    }
+                    summary_df = pd.DataFrame(summary_data)
+                    summary_df.to_excel(writer, sheet_name='Summary', index=False)
+                
+                QMessageBox.information(self, "成功", f"数据已导出到: {file_name}")
             except Exception as e:
-                QMessageBox.critical(self, "错误", f"导出Excel时出错: {str(e)}")
+                QMessageBox.critical(self, "错误", f"导出Excel时出错: {str(e)}\n{traceback.format_exc()}")
     
+    # 更新的PPT创建函数，支持16:9格式和更多图表
     def create_ppt(self):
-        """创建PPT报告，使用当前显示数据（已排除异常值）"""
+        """创建PPT报告，使用当前显示数据（已排除异常值），16:9格式"""
         if self.transformed_data is None:
             QMessageBox.warning(self, "警告", "没有可导出的数据")
             return
@@ -1436,8 +1785,8 @@ class WaferAnalysisApp(QMainWindow):
                 # 创建演示文稿
                 prs = Presentation()
                 
-                # 设置幻灯片大小为标准尺寸(4:3)
-                prs.slide_width = Inches(10)
+                # 设置幻灯片大小为16:9格式
+                prs.slide_width = Inches(13.33)
                 prs.slide_height = Inches(7.5)
                 
                 # 添加空白幻灯片
@@ -1445,7 +1794,7 @@ class WaferAnalysisApp(QMainWindow):
                 slide = prs.slides.add_slide(blank_slide_layout)
                 
                 # 添加标题 - 位置调高
-                title_shape = slide.shapes.add_textbox(Inches(0), Inches(0.1), Inches(10), Inches(0.5))
+                title_shape = slide.shapes.add_textbox(Inches(0), Inches(0.1), Inches(13.33), Inches(0.5))
                 title_frame = title_shape.text_frame
                 title_para = title_frame.add_paragraph()
                 title_para.text = "Wafer Measurement Analysis Report"
@@ -1454,24 +1803,42 @@ class WaferAnalysisApp(QMainWindow):
                 title_run.font.size = Pt(20)
                 title_run.font.bold = True
                 
-                # 左侧放置Box Plot
-                left_panel_x = Inches(0.2)
-                left_panel_y = Inches(0.7)  # 位置调高
-                left_panel_width = Inches(3.5)
-                left_panel_height = Inches(5.0)
+                # 检查所有K-shift是否都小于1.5
+                all_within_threshold, k_shift_values = self.check_all_kshift_less_than_threshold()
                 
-                # 右侧放置Quantile Plot (2x3网格)
-                right_panel_x = Inches(3.8)
-                right_panel_y = Inches(0.7)  # 位置调高
-                right_panel_width = Inches(6.0)
-                right_panel_height = Inches(5.0)
+                # 添加结论文本框
+                conclusion_shape = slide.shapes.add_textbox(Inches(0.2), Inches(0.7), Inches(13), Inches(0.3))
+                conclusion_frame = conclusion_shape.text_frame
+                conclusion_para = conclusion_frame.add_paragraph()
                 
-                # 计算单个Box Plot的尺寸
-                box_plot_height = left_panel_height / len(self.available_parameters)
+                if all_within_threshold:
+                    conclusion_para.text = "All the WAT items are <1.5 sigma, comparable with POR"
+                    conclusion_run = conclusion_para.runs[0]
+                    conclusion_run.font.color.rgb = RGBColor(0, 128, 0)  # 绿色
+                else:
+                    conclusion_para.text = "Some WAT items exceed 1.5 sigma threshold, attention needed"
+                    conclusion_run = conclusion_para.runs[0]
+                    conclusion_run.font.color.rgb = RGBColor(255, 0, 0)  # 红色
                 
-                # 计算单个Quantile Plot的尺寸
-                quantile_plot_width = right_panel_width / 2
-                quantile_plot_height = right_panel_height / 3
+                conclusion_run.font.bold = True
+                conclusion_run.font.size = Pt(14)
+                
+                # 定义布局区域
+                # 16:9格式下的布局调整
+                chart_area_top = Inches(1.2)
+                chart_area_height = Inches(4.0)
+                table_area_top = Inches(5.3)
+                table_area_height = Inches(2.0)
+                
+                # 左侧区域：散点图和箱形图
+                left_area_x = Inches(0.2)
+                left_area_width = Inches(4.0)
+                
+                # 中间和右侧区域：QQ图表
+                middle_area_x = Inches(4.4)
+                middle_area_width = Inches(4.5)
+                right_area_x = Inches(9.1)
+                right_area_width = Inches(4.0)
                 
                 # 确保Baseline在前，2nd tool在后
                 ordered_group_values = []
@@ -1484,106 +1851,62 @@ class WaferAnalysisApp(QMainWindow):
                     if group not in ordered_group_values:
                         ordered_group_values.append(group)
                 
-                # 获取正确的基线组和对照组
-                baseline_group = ordered_group_values[0]  # 第一个组视为基线
-                second_tool_group = ordered_group_values[1] if len(ordered_group_values) > 1 else None
-                
-                # 获取每个参数的统计数据，用于最后的表格
+                # 获取每个参数的统计数据，用于表格
                 all_stats = {}
                 
-                # 创建左侧Box Plot
+                # 为每个参数创建Wafer ID散点图和箱图 (左侧)
                 for i, parameter in enumerate(self.available_parameters):
-                    # 计算Box Plot位置
-                    y_pos = left_panel_y + i * box_plot_height
-                    
-                    # 创建Box Plot图像
-                    fig = Figure(figsize=(4, 1.7), dpi=100)
-                    ax = fig.add_subplot(111)
-                    
-                    # 准备数据
-                    box_data = []
-                    valid_labels = []
-                    
-                    for group in ordered_group_values:
-                        # 使用当前的display_data（已排除异常值）
-                        mask = self.display_data[self.condition_col] == group
-                        group_data = self.display_data.loc[mask, parameter].dropna()
+                    if i >= 3:  # 限制显示的参数数量
+                        break
                         
-                        if len(group_data) > 0:
-                            box_data.append(group_data)
-                            valid_labels.append(group)
+                    y_pos = chart_area_top + i * (chart_area_height / 3)
                     
-                    if not box_data:
-                        ax.text(0.5, 0.5, f"无数据可用于 {parameter}", ha='center', va='center', transform=ax.transAxes)
-                        continue
-                    
-                    # 创建箱线图
-                    colors = []
-                    for label in valid_labels:
-                        if label == "Baseline":
-                            colors.append('lightblue')
-                        elif label == "2nd tool":
-                            colors.append('lightgreen')
-                        else:
-                            colors.append('lightgray')  # 默认颜色
-                    
-                    boxplot = ax.boxplot(box_data, patch_artist=True, labels=valid_labels)
-                    
-                    for j, patch in enumerate(boxplot['boxes']):
-                        if j < len(colors):
-                            patch.set_facecolor(colors[j])
-                    
-                    # 添加标题
-                    ax.set_title(f'Box Plot - {parameter}', fontsize=10)
-                    ax.set_ylabel(parameter, fontsize=8)
-                    ax.tick_params(axis='both', labelsize=7)
-                    
-                    fig.tight_layout()
+                    # 创建Wafer ID散点图
+                    scatter_fig = Figure(figsize=(4, 1.2), dpi=100)
+                    self.update_wafer_scatter_plot(scatter_fig, parameter)
                     
                     # 转换为字节流
-                    buf = io.BytesIO()
-                    fig.savefig(buf, format='png', bbox_inches='tight')
-                    plt.close(fig)
-                    buf.seek(0)
+                    scatter_buf = io.BytesIO()
+                    scatter_fig.savefig(scatter_buf, format='png', bbox_inches='tight')
+                    plt.close(scatter_fig)
+                    scatter_buf.seek(0)
                     
                     # 添加到PPT
                     slide.shapes.add_picture(
-                        buf, 
-                        left_panel_x, 
+                        scatter_buf, 
+                        left_area_x, 
                         y_pos, 
-                        width=left_panel_width
+                        width=left_area_width
                     )
                     
-                    # 计算统计数据 - 使用当前参数的排除点
-                    stats_dict = self.calculate_statistics(
+                    # 计算统计数据
+                    stats_dict, baseline_group, second_tool_group = self.calculate_statistics(
                         parameter, 
                         self.condition_col, 
                         ordered_group_values,
                         self.excluded_points
                     )
-                    all_stats[parameter] = stats_dict
+                    all_stats[parameter] = (stats_dict, baseline_group, second_tool_group)
                 
-                # 创建右侧Quantile Plot (2x3网格)
-                grid_positions = [
-                    # Col 1
-                    (right_panel_x, right_panel_y),                              # Row 1, Col 1
-                    (right_panel_x, right_panel_y + quantile_plot_height),       # Row 2, Col 1
-                    (right_panel_x, right_panel_y + 2 * quantile_plot_height),   # Row 3, Col 1
-                    # Col 2
-                    (right_panel_x + quantile_plot_width, right_panel_y),                         # Row 1, Col 2
-                    (right_panel_x + quantile_plot_width, right_panel_y + quantile_plot_height),  # Row 2, Col 2
-                    (right_panel_x + quantile_plot_width, right_panel_y + 2 * quantile_plot_height) # Row 3, Col 2
-                ]
+                # 创建QQ图 (中间和右侧区域)
+                qq_positions = []
                 
-                # 最多放置6个Quantile Plot
+                # 中间列
+                for i in range(3):
+                    qq_positions.append((middle_area_x, chart_area_top + i * (chart_area_height / 3)))
+                
+                # 右侧列
+                for i in range(3):
+                    qq_positions.append((right_area_x, chart_area_top + i * (chart_area_height / 3)))
+                
+                # 最多放置6个QQ图
                 for i, parameter in enumerate(self.available_parameters[:6]):
-                    # 计算Quantile Plot位置
-                    if i < len(grid_positions):
-                        x_pos, y_pos = grid_positions[i]
+                    if i < len(qq_positions):
+                        x_pos, y_pos = qq_positions[i]
                         
-                        # 创建QQ Plot图像
-                        fig = Figure(figsize=(2.9, 1.7), dpi=100)
-                        ax = fig.add_subplot(111)
+                        # 创建QQ图
+                        qq_fig = Figure(figsize=(4, 1.2), dpi=100)
+                        ax = qq_fig.add_subplot(111)
                         
                         # 确保Baseline和2nd tool始终是固定颜色
                         color_map = {
@@ -1618,7 +1941,7 @@ class WaferAnalysisApp(QMainWindow):
                             marker = marker_map.get(group, '^')
                             
                             ax.plot(sorted_data, norm_quantiles, color=color, marker=marker,
-                                   linestyle='-', label=group, markersize=4)
+                                linestyle='-', label=group, markersize=4)
                         
                         # 添加标题
                         ax.set_title(parameter, fontsize=10)
@@ -1643,22 +1966,23 @@ class WaferAnalysisApp(QMainWindow):
                         # 添加网格
                         ax.grid(True, alpha=0.3)
                         
-                        fig.tight_layout()
+                        qq_fig.tight_layout()
                         
                         # 转换为字节流
-                        buf = io.BytesIO()
-                        fig.savefig(buf, format='png', bbox_inches='tight')
-                        plt.close(fig)
-                        buf.seek(0)
+                        qq_buf = io.BytesIO()
+                        qq_fig.savefig(qq_buf, format='png', bbox_inches='tight')
+                        plt.close(qq_fig)
+                        qq_buf.seek(0)
                         
                         # 添加到PPT
                         slide.shapes.add_picture(
-                            buf, 
+                            qq_buf, 
                             x_pos, 
                             y_pos, 
-                            width=quantile_plot_width
-                        ) 
-                # 创建底部的统计表格 - 调整位置和大小
+                            width=middle_area_width if i < 3 else right_area_width
+                        )
+                
+                # 创建底部的统计表格
                 table_rows = len(self.available_parameters) + 2  # 参数数量 + 标题两行
                 table_cols = 5  # Condition, BSL Mean, BSL Std Dev, 2nd Tool Mean, K-shift
                 
@@ -1666,24 +1990,31 @@ class WaferAnalysisApp(QMainWindow):
                     table_rows, 
                     table_cols,
                     Inches(0.5), 
-                    Inches(5.7),  # 位置略向上调整，避免超出页面
-                    Inches(9), 
-                    Inches(1.6)
+                    table_area_top,
+                    Inches(12.33), 
+                    table_area_height
                 ).table
                 
                 # 设置列宽
-                table.columns[0].width = Inches(2.0)
+                table.columns[0].width = Inches(2.5)
                 for i in range(1, 5):
-                    table.columns[i].width = Inches(1.75)
+                    table.columns[i].width = Inches(2.46)
                 
-                # 添加表头 - 完全符合JMP风格
+                # 获取第一个参数的统计信息，以获取基准组和对照组
+                if self.available_parameters and self.available_parameters[0] in all_stats:
+                    _, baseline_group, second_tool_group = all_stats[self.available_parameters[0]]
+                else:
+                    baseline_group = ordered_group_values[0] if ordered_group_values else "Baseline"
+                    second_tool_group = ordered_group_values[1] if len(ordered_group_values) > 1 else "2nd tool"
+                
+                # 添加表头
                 header_cells = [
-                    "Condition", baseline_group, "", second_tool_group, ""
+                    "Parameter", baseline_group, "", second_tool_group, ""
                 ]
                 for i, text in enumerate(header_cells):
                     cell = table.cell(0, i)
                     cell.text = text if text is not None else ""
-                    # 安全地设置粗体和字体大小
+                    # 设置粗体和字体大小
                     para = cell.text_frame.paragraphs[0]
                     para.alignment = PP_ALIGN.CENTER
                     if not para.runs:
@@ -1701,7 +2032,7 @@ class WaferAnalysisApp(QMainWindow):
                 for i, text in enumerate(subheader_cells):
                     cell = table.cell(1, i)
                     cell.text = text
-                    # 安全地设置粗体和字体大小
+                    # 设置粗体和字体大小
                     para = cell.text_frame.paragraphs[0]
                     para.alignment = PP_ALIGN.CENTER
                     if not para.runs:
@@ -1714,39 +2045,39 @@ class WaferAnalysisApp(QMainWindow):
                 
                 # 添加数据行
                 for i, parameter in enumerate(self.available_parameters):
-                    stats_dict = all_stats.get(parameter, {})
-                    
-                    if not stats_dict:
-                        continue
+                    if i + 2 >= table_rows:  # 避免超出表格行数
+                        break
                         
-                    # 准备数据
-                    baseline_stats = stats_dict.get(baseline_group, {})
-                    second_tool_stats = stats_dict.get(second_tool_group, {}) if second_tool_group else {}
-                    
-                    # 为小值启用科学记号
-                    def format_value(value, param_name):
-                        if value is None or np.isnan(value):
-                            return 'N/A'
+                    if parameter in all_stats:
+                        stats_dict, baseline_group, second_tool_group = all_stats[parameter]
                         
-                        # 判断是否为非常小的值 (例如LK类似的量级)
-                        if 'LK' in param_name and abs(value) < 0.001:
-                            return f"{value:.4e}"  # 使用科学记号
-                        elif abs(value) < 0.0001:  # 其他很小的值也使用科学记号
-                            return f"{value:.4e}"
-                        else:
-                            return f"{value:.4f}"  # 常规数值使用固定小数点
-                    
-                    row_data = [
-                        parameter,
-                        format_value(baseline_stats.get('Mean', np.nan), parameter) if 'Mean' in baseline_stats else 'N/A',
-                        format_value(baseline_stats.get('Std Dev', np.nan), parameter) if 'Std Dev' in baseline_stats else 'N/A',
-                        format_value(second_tool_stats.get('Mean', np.nan), parameter) if 'Mean' in second_tool_stats else 'N/A',
-                        format_value(second_tool_stats.get('K-shift', np.nan), parameter) if 'K-shift' in second_tool_stats else 'N/A'
-                    ]
-                    
-                    # 填充表格
-                    for j, text in enumerate(row_data):
-                        if i + 2 < table_rows and j < table_cols:  # 防止索引越界
+                        # 准备数据
+                        baseline_stats = stats_dict.get(baseline_group, {})
+                        second_tool_stats = stats_dict.get(second_tool_group, {}) if second_tool_group else {}
+                        
+                        # 为小值启用科学记号
+                        def format_value(value, param_name):
+                            if value is None or np.isnan(value):
+                                return 'N/A'
+                            
+                            # 判断是否为非常小的值 (例如LK类似的量级)
+                            if 'LK' in param_name and abs(value) < 0.001:
+                                return f"{value:.4e}"  # 使用科学记号
+                            elif abs(value) < 0.0001:  # 其他很小的值也使用科学记号
+                                return f"{value:.4e}"
+                            else:
+                                return f"{value:.4f}"  # 常规数值使用固定小数点
+                        
+                        row_data = [
+                            parameter,
+                            format_value(baseline_stats.get('Mean', np.nan), parameter) if 'Mean' in baseline_stats else 'N/A',
+                            format_value(baseline_stats.get('Std Dev', np.nan), parameter) if 'Std Dev' in baseline_stats else 'N/A',
+                            format_value(second_tool_stats.get('Mean', np.nan), parameter) if 'Mean' in second_tool_stats else 'N/A',
+                            format_value(second_tool_stats.get('K-shift', np.nan), parameter) if 'K-shift' in second_tool_stats else 'N/A'
+                        ]
+                        
+                        # 填充表格
+                        for j, text in enumerate(row_data):
                             cell = table.cell(i + 2, j)
                             cell.text = text
                             para = cell.text_frame.paragraphs[0]
@@ -1757,13 +2088,22 @@ class WaferAnalysisApp(QMainWindow):
                             else:
                                 run = para.runs[0]
                             run.font.size = Pt(10)
+                            
+                            # 如果是K-shift且绝对值大于1.5，使用红色
+                            if j == 4 and text != 'N/A':
+                                try:
+                                    k_shift_value = float(text)
+                                    if abs(k_shift_value) >= 1.5:
+                                        run.font.color.rgb = RGBColor(255, 0, 0)  # 红色
+                                except:
+                                    pass
                 
                 # 保存演示文稿
                 prs.save(file_name)
                 QMessageBox.information(self, "成功", f"已创建PPT文件: {file_name}")
                 
             except Exception as e:
-                QMessageBox.critical(self, "错误", f"创建PPT时出错: {str(e)}")
+                QMessageBox.critical(self, "错误", f"创建PPT时出错: {str(e)}\n{traceback.format_exc()}")
 
     def show_about(self):
         """显示关于对话框"""
