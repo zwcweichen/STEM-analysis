@@ -1,0 +1,87 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.interpolate import make_interp_spline
+import seaborn as sns
+
+# 假设你已将PowerBI表格导出为CSV文件
+# 替换为你的实际文件路径
+file_path = "your_data.csv"
+
+# 读取数据
+df = pd.read_csv(file_path)
+
+# 查看有多少个不同的站点
+unique_ope_no = df['OPE_NO'].unique()
+print(f"一共有 {len(unique_ope_no)} 个不同的站点")
+print("站点编号列表:", unique_ope_no)
+
+# 设置绘图风格
+sns.set_style("whitegrid")
+plt.rcParams.update({'font.size': 12})
+
+# 计算子图布局的行数和列数
+n_plots = len(unique_ope_no)
+n_cols = min(3, n_plots)  # 每行最多3个图
+n_rows = (n_plots + n_cols - 1) // n_cols
+
+# 创建一个足够大的图形
+fig, axes = plt.subplots(n_rows, n_cols, figsize=(6*n_cols, 4*n_rows))
+axes = axes.flatten() if n_plots > 1 else [axes]
+
+# 为每个站点创建子图
+for i, ope_no in enumerate(unique_ope_no):
+    # 获取当前站点的数据
+    site_data = df[df['OPE_NO'] == ope_no].sort_values('WEEK')
+    
+    # 准备数据
+    weeks = site_data['WEEK']
+    avg_wait = site_data['AVG_WAIT']
+    max_wait = site_data['MAX_WAIT']
+    
+    # 如果数据点足够多，使用样条插值创建平滑曲线
+    if len(weeks) > 3:
+        # 创建一个更密集的x轴点集，用于平滑插值
+        X_Y_Spline = np.linspace(0, len(weeks)-1, 100)
+        
+        # 创建样条模型
+        avg_wait_smooth = make_interp_spline(range(len(weeks)), avg_wait)(X_Y_Spline)
+        max_wait_smooth = make_interp_spline(range(len(weeks)), max_wait)(X_Y_Spline)
+        
+        # 确保平滑后的值不为负
+        avg_wait_smooth = np.maximum(avg_wait_smooth, 0)
+        max_wait_smooth = np.maximum(max_wait_smooth, 0)
+        
+        # 绘制平滑曲线
+        axes[i].plot(X_Y_Spline, avg_wait_smooth, '-', label='AVG_WAIT', color='blue', linewidth=2)
+        axes[i].plot(X_Y_Spline, max_wait_smooth, '-', label='MAX_WAIT', color='red', linewidth=2)
+        
+        # 在原始数据点位置添加标记
+        axes[i].scatter(range(len(weeks)), avg_wait, color='blue', s=30)
+        axes[i].scatter(range(len(weeks)), max_wait, color='red', s=30)
+        
+        # 设置x轴刻度为原始周数
+        axes[i].set_xticks(range(len(weeks)))
+        axes[i].set_xticklabels(weeks, rotation=45)
+    else:
+        # 如果数据点太少，直接连线
+        axes[i].plot(range(len(weeks)), avg_wait, 'o-', label='AVG_WAIT', color='blue', linewidth=2)
+        axes[i].plot(range(len(weeks)), max_wait, 'o-', label='MAX_WAIT', color='red', linewidth=2)
+        axes[i].set_xticks(range(len(weeks)))
+        axes[i].set_xticklabels(weeks, rotation=45)
+    
+    # 设置标题和标签
+    axes[i].set_title(f'站点 {ope_no}')
+    axes[i].set_xlabel('周')
+    axes[i].set_ylabel('等待时间')
+    axes[i].legend()
+    axes[i].grid(True, alpha=0.3)
+    
+# 隐藏多余的子图
+for j in range(n_plots, len(axes)):
+    axes[j].axis('off')
+
+# 调整布局
+plt.tight_layout()
+plt.savefig('waiting_time_by_site.png', dpi=300, bbox_inches='tight')
+plt.show()
