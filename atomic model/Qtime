@@ -1,87 +1,161 @@
 import pandas as pd
-import matplotlib.pyplot as plt
 import numpy as np
-from scipy.interpolate import make_interp_spline
-import seaborn as sns
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-# 假设你已将PowerBI表格导出为CSV文件
-# 替换为你的实际文件路径
-file_path = "your_data.csv"
+# 创建示例数据集，匹配您的截图
+site_ids = [155, 180, 190, 200, 215]
+weeks = ["W513", "W514", "W515", "W516"]
 
-# 读取数据
-df = pd.read_csv(file_path)
+# 准备数据
+data = []
+for site in site_ids:
+    for week in weeks:
+        data.append([site, week, 0, 0])  # 先创建空的行
 
-# 查看有多少个不同的站点
-unique_ope_no = df['OPE_NO'].unique()
-print(f"一共有 {len(unique_ope_no)} 个不同的站点")
-print("站点编号列表:", unique_ope_no)
+# 填充具体数据值 (匹配您截图中的数据)
+# Site 155
+data[0][2], data[0][3] = 35, 16
+data[1][2], data[1][3] = 36, 60
+data[2][2], data[2][3] = 38, 50
+data[3][2], data[3][3] = 35, 16
 
-# 设置绘图风格
-sns.set_style("whitegrid")
-plt.rcParams.update({'font.size': 12})
+# Site 180
+data[4][2], data[4][3] = 33, 30
+data[5][2], data[5][3] = 33.5, 34.5
+data[6][2], data[6][3] = 34, 35
+data[7][2], data[7][3] = 33, 28
 
-# 计算子图布局的行数和列数
-n_plots = len(unique_ope_no)
-n_cols = min(3, n_plots)  # 每行最多3个图
-n_rows = (n_plots + n_cols - 1) // n_cols
+# Site 190
+data[8][2], data[8][3] = 40, 55
+data[9][2], data[9][3] = 40, 56
+data[10][2], data[10][3] = 40, 52
+data[11][2], data[11][3] = 40, 55
 
-# 创建一个足够大的图形
-fig, axes = plt.subplots(n_rows, n_cols, figsize=(6*n_cols, 4*n_rows))
-axes = axes.flatten() if n_plots > 1 else [axes]
+# Site 200
+data[12][2], data[12][3] = 15, 65
+data[13][2], data[13][3] = 15, 60
+data[14][2], data[14][3] = 13, 20
+data[15][2], data[15][3] = 15, 65
 
-# 为每个站点创建子图
-for i, ope_no in enumerate(unique_ope_no):
-    # 获取当前站点的数据
-    site_data = df[df['OPE_NO'] == ope_no].sort_values('WEEK')
+# Site 215
+data[16][2], data[16][3] = 48, 70
+data[17][2], data[17][3] = 50, 60
+data[18][2], data[18][3] = 47, 52
+data[19][2], data[19][3] = 48, 70
+
+# 创建DataFrame
+df = pd.DataFrame(data, columns=["OPE_NO", "WEEK", "AVG_WAIT", "MAX_WAIT"])
+
+# 获取唯一站点
+unique_sites = df["OPE_NO"].unique()
+print(f"Number of unique sites: {len(unique_sites)}")
+print(f"Site list: {', '.join(map(str, unique_sites))}")
+
+# 设置布局
+n_rows = 2
+n_cols = 5
+
+# 创建子图
+fig = make_subplots(
+    rows=n_rows, 
+    cols=n_cols,
+    subplot_titles=[f"Site {site}" for site in unique_sites],
+    vertical_spacing=0.1,
+    horizontal_spacing=0.05
+)
+
+# 决定哪些子图显示y轴标题 (第一列的子图)
+show_y_titles = [True, False, False, False, False, True, False, False, False, False]
+
+# 为每个站点添加轨迹
+for i, site_id in enumerate(unique_sites):
+    # 计算行和列位置
+    row = (i // n_cols) + 1
+    col = (i % n_cols) + 1
     
-    # 准备数据
-    weeks = site_data['WEEK']
-    avg_wait = site_data['AVG_WAIT']
-    max_wait = site_data['MAX_WAIT']
+    # 过滤当前站点的数据
+    site_data = df[df["OPE_NO"] == site_id].sort_values("WEEK")
     
-    # 如果数据点足够多，使用样条插值创建平滑曲线
-    if len(weeks) > 3:
-        # 创建一个更密集的x轴点集，用于平滑插值
-        X_Y_Spline = np.linspace(0, len(weeks)-1, 100)
-        
-        # 创建样条模型
-        avg_wait_smooth = make_interp_spline(range(len(weeks)), avg_wait)(X_Y_Spline)
-        max_wait_smooth = make_interp_spline(range(len(weeks)), max_wait)(X_Y_Spline)
-        
-        # 确保平滑后的值不为负
-        avg_wait_smooth = np.maximum(avg_wait_smooth, 0)
-        max_wait_smooth = np.maximum(max_wait_smooth, 0)
-        
-        # 绘制平滑曲线
-        axes[i].plot(X_Y_Spline, avg_wait_smooth, '-', label='AVG_WAIT', color='blue', linewidth=2)
-        axes[i].plot(X_Y_Spline, max_wait_smooth, '-', label='MAX_WAIT', color='red', linewidth=2)
-        
-        # 在原始数据点位置添加标记
-        axes[i].scatter(range(len(weeks)), avg_wait, color='blue', s=30)
-        axes[i].scatter(range(len(weeks)), max_wait, color='red', s=30)
-        
-        # 设置x轴刻度为原始周数
-        axes[i].set_xticks(range(len(weeks)))
-        axes[i].set_xticklabels(weeks, rotation=45)
-    else:
-        # 如果数据点太少，直接连线
-        axes[i].plot(range(len(weeks)), avg_wait, 'o-', label='AVG_WAIT', color='blue', linewidth=2)
-        axes[i].plot(range(len(weeks)), max_wait, 'o-', label='MAX_WAIT', color='red', linewidth=2)
-        axes[i].set_xticks(range(len(weeks)))
-        axes[i].set_xticklabels(weeks, rotation=45)
+    # 是否显示图例 (只在右上角子图显示)
+    show_legend = (i == n_cols-1)
     
-    # 设置标题和标签
-    axes[i].set_title(f'站点 {ope_no}')
-    axes[i].set_xlabel('周')
-    axes[i].set_ylabel('等待时间')
-    axes[i].legend()
-    axes[i].grid(True, alpha=0.3)
+    # 是否显示y轴标题 (只在每行第一个子图显示)
+    show_y_title = show_y_titles[i] if i < len(show_y_titles) else False
     
-# 隐藏多余的子图
-for j in range(n_plots, len(axes)):
-    axes[j].axis('off')
+    # 是否显示x轴标签 (只在底部行显示)
+    show_x_label = (row == n_rows)
+    
+    # 计算y轴范围，基于此站点的数据
+    y_min = 0
+    y_max = max(site_data["MAX_WAIT"]) * 1.1  # 增加10%边距
+    
+    # 添加AVG_WAIT轨迹
+    fig.add_trace(
+        go.Scatter(
+            x=site_data["WEEK"],
+            y=site_data["AVG_WAIT"],
+            mode="lines+markers",
+            line=dict(shape="spline", smoothing=1.3, width=3, color="blue"),
+            marker=dict(size=8, color="blue"),
+            name="AVG_WAIT",
+            showlegend=show_legend
+        ),
+        row=row, col=col
+    )
+    
+    # 添加MAX_WAIT轨迹
+    fig.add_trace(
+        go.Scatter(
+            x=site_data["WEEK"],
+            y=site_data["MAX_WAIT"],
+            mode="lines+markers",
+            line=dict(shape="spline", smoothing=1.3, width=3, color="red"),
+            marker=dict(size=8, color="red"),
+            name="MAX_WAIT",
+            showlegend=show_legend
+        ),
+        row=row, col=col
+    )
+    
+    # 更新x轴
+    fig.update_xaxes(
+        title=None if not show_x_label else "Week",
+        tickangle=45,
+        tickfont=dict(size=11),
+        row=row, col=col
+    )
+    
+    # 更新y轴
+    fig.update_yaxes(
+        title=None if not show_y_title else "Wait Time",
+        range=[y_min, y_max],
+        row=row, col=col
+    )
 
-# 调整布局
-plt.tight_layout()
-plt.savefig('waiting_time_by_site.png', dpi=300, bbox_inches='tight')
-plt.show()
+# 更新布局
+fig.update_layout(
+    title=dict(
+        text="<b>Wait Time Trends by Site</b>",
+        font=dict(size=18),
+        y=0.98
+    ),
+    # 这里可以调整图例位置
+    legend=dict(
+        orientation="h",
+        x=0.99,           # 在右侧
+        y=0.95,           # 在顶部下方
+        xanchor="right",  # 右对齐
+        yanchor="top",    # 顶部对齐
+        font=dict(size=12)
+    ),
+    margin=dict(t=80, l=40, r=10, b=40),
+    height=600,           # 调整总高度
+    width=1000            # 调整总宽度
+)
+
+# 显示图表
+fig.show()
+
+# 如果需要保存为HTML文件
+# fig.write_html("wait_time_trends_by_site.html")
