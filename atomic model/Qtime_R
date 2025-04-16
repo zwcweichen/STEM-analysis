@@ -4,17 +4,29 @@ library(dplyr)
 library(tidyr)
 library(purrr)
 
-# 创建测试数据集（替代读取Excel文件）
-dataset <- data.frame(
-  OPE_NO = rep(c("站点1", "站点2", "站点3", "站点4", "站点5", 
-                 "站点6", "站点7", "站点8", "站点9", "站点10"), each = 5),
-  WEEK = rep(paste0("W", 513:517), 10),
-  AVG_WAIT = round(runif(50, 2, 10), 2),
-  MAX_WAIT = round(runif(50, 8, 20), 2)
-)
+# 假设我们已经有数据集
+# 如果您需要从CSV读取数据，请使用：
+# dataset <- read.csv("你的文件路径.csv", header = TRUE, stringsAsFactors = FALSE)
 
-# 查看数据前几行
-head(dataset)
+# 创建示例数据集以匹配您的截图中的站点
+dataset <- data.frame(
+  OPE_NO = rep(c(155, 180, 190, 200, 215), each = 4),
+  WEEK = rep(paste0("W", 513:516), 5),
+  AVG_WAIT = c(
+    35, 36, 38, 35,  # 站点155
+    33, 33.5, 34, 33,  # 站点180
+    40, 40, 40, 40,  # 站点190
+    15, 15, 13, 15,  # 站点200
+    48, 50, 47, 48   # 站点215
+  ),
+  MAX_WAIT = c(
+    16, 60, 50, 16,  # 站点155
+    30, 34.5, 35, 28,  # 站点180
+    55, 56, 52, 55,  # 站点190
+    65, 60, 20, 65,  # 站点200
+    70, 60, 52, 70   # 站点215
+  )
+)
 
 # 计算唯一站点数量
 unique_sites <- unique(dataset$OPE_NO)
@@ -22,11 +34,15 @@ cat("一共有", length(unique_sites), "个不同的站点\n")
 cat("站点编号列表:", paste(unique_sites, collapse=", "), "\n")
 
 # 创建一个函数来为每个站点生成子图
-create_site_plot <- function(site_id, show_legend = FALSE) {
+create_site_plot <- function(site_id, show_legend = FALSE, show_y_title = FALSE) {
   # 过滤出当前站点的数据并按WEEK排序
   site_data <- dataset %>% 
     filter(OPE_NO == site_id) %>%
     arrange(WEEK)
+  
+  # 获取所有站点的最大和最小值用于统一Y轴范围
+  y_min <- 0  # 通常从0开始
+  y_max <- max(dataset$MAX_WAIT, na.rm = TRUE) * 1.1  # 增加10%空间
   
   # 创建交互式图表
   p <- plot_ly(data = site_data) %>%
@@ -54,74 +70,88 @@ create_site_plot <- function(site_id, show_legend = FALSE) {
       title = list(
         text = paste0('<b>站点 ', site_id, '</b>'),
         font = list(size = 14),
-        y = 0.95
+        y = 0.9
       ),
-      xaxis = list(title = '周', tickangle = 45),
-      yaxis = list(title = '等待时间'),
+      xaxis = list(
+        title = "周",
+        tickangle = 45,
+        tickfont = list(size = 11)
+      ),
+      yaxis = list(
+        title = if(show_y_title) "等待时间" else "",
+        range = c(y_min, y_max),  # 统一Y轴范围
+        fixedrange = TRUE  # 固定Y轴范围
+      ),
       hovermode = 'closest',
-      margin = list(t = 50)
+      margin = list(t = 40, r = 10, b = 40, l = if(show_y_title) 50 else 20)  # 调整边距
     )
   
   return(p)
 }
 
-# 简化版本 - 直接使用固定布局，避免可能的错误
-if(length(unique_sites) <= 25) {
-  # 为10个站点固定使用2行5列布局
-  n_rows <- 2
-  n_cols <- 5
-  
-  cat("使用固定布局:", n_rows, "行 x", n_cols, "列\n")
-  
-  # 创建一个包含所有子图的列表 - 只为第一个子图显示图例
-  plot_list <- lapply(seq_along(unique_sites), function(i) {
-    site_id <- unique_sites[i]
-    # 只让第一个子图显示图例
-    show_legend <- (i == 1)
-    create_site_plot(site_id, show_legend)
-  })
-  
-  # 使用更安全的subplot方法
-  tryCatch({
-    # 尝试创建子图
-    combined_plot <- subplot(
-      plot_list,
-      nrows = n_rows,
-      shareX = FALSE,
-      shareY = FALSE,
-      titleX = TRUE,
-      titleY = TRUE,
-      margin = 0.07
-    ) %>%
-      layout(
-        title = list(
-          text = '<b>各站点等待时间趋势</b>',
-          font = list(size = 18)
-        ),
-        showlegend = TRUE,
-        legend = list(
-          orientation = 'h',      # 水平图例
-          x = 0.5,                # 水平居中
-          y = 1.02,               # 放在图表上方
-          xanchor = 'center',     # 锚点居中
-          font = list(size = 12)  # 图例字体大小
-        ),
-        margin = list(t = 100, l = 60, r = 30, b = 60)
-      )
-    
-    # 显示图表
-    print(combined_plot)
-  }, error = function(e) {
-    # 如果出错，打印错误信息并尝试备用方法
-    cat("创建子图时出错:", e$message, "\n")
-    cat("尝试备用方法...\n")
-    
-    # 备用方法: 使用简单图表
-    simple_plot <- create_site_plot(unique_sites[1], TRUE)
-    print(simple_plot)
-  })
-  
-} else {
-  # 下拉菜单方式保持不变...
-  # (下拉菜单部分代码保持不变)
+# 设置固定的布局
+n_rows <- 2
+n_cols <- 5
+
+# 确定哪些子图显示Y轴标题（只显示每行的第一个）
+show_y_titles <- rep(FALSE, length(unique_sites))
+for(i in 1:n_rows) {
+  first_idx_in_row <- (i-1) * n_cols + 1
+  if(first_idx_in_row <= length(unique_sites)) {
+    show_y_titles[first_idx_in_row] <- TRUE
+  }
 }
+
+# 创建子图列表
+plot_list <- lapply(seq_along(unique_sites), function(i) {
+  site_id <- unique_sites[i]
+  # 只让第一个子图显示图例
+  show_legend <- (i == 1)
+  # 只让每行第一个子图显示Y轴标题
+  show_y_title <- show_y_titles[i]
+  create_site_plot(site_id, show_legend, show_y_title)
+})
+
+# 创建子图
+tryCatch({
+  # 合并子图
+  combined_plot <- subplot(
+    plot_list,
+    nrows = n_rows,
+    shareY = TRUE,  # 共享Y轴范围
+    shareX = FALSE, 
+    titleX = TRUE,
+    titleY = FALSE,  # 不显示所有Y轴标题，我们在函数中控制
+    margin = 0.04    # 减小子图间距
+  ) %>%
+    layout(
+      title = list(
+        text = '<b>各站点等待时间趋势</b>',
+        font = list(size = 18),
+        y = 0.98
+      ),
+      showlegend = TRUE,
+      legend = list(
+        orientation = 'h',      # 水平图例
+        x = 0.5,                # 水平居中
+        y = 1.05,               # 放在图表上方
+        xanchor = 'center',     # 锚点居中
+        font = list(size = 12)  # 图例字体大小
+      ),
+      margin = list(t = 80, l = 40, r = 10, b = 40)  # 调整整体边距
+    )
+  
+  # 显示图表
+  print(combined_plot)
+  
+  # 可选：保存图表为HTML文件
+  # htmlwidgets::saveWidget(combined_plot, "各站点等待时间趋势.html", selfcontained = TRUE)
+  
+}, error = function(e) {
+  cat("创建子图时出错:", e$message, "\n")
+  cat("尝试备用方法...\n")
+  
+  # 备用方法: 使用简单图表
+  simple_plot <- create_site_plot(unique_sites[1], TRUE, TRUE)
+  print(simple_plot)
+})
