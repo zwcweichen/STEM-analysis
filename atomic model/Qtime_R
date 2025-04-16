@@ -59,85 +59,46 @@ create_site_plot <- function(site_id) {
   return(p)
 }
 
-# 智能计算子图布局函数
-calculate_optimal_layout <- function(n) {
-  # 获取所有可能的因数对
-  factors <- list()
-  for (i in 1:floor(sqrt(n))) {
-    if (n %% i == 0) {
-      factors[[length(factors) + 1]] <- c(i, n/i)
-    }
-  }
-  
-  # 如果完全没有因数对（如质数），则使用接近的数字
-  if (length(factors) == 0) {
-    cols <- floor(sqrt(n))
-    rows <- ceiling(n/cols)
-    return(c(rows, cols))
-  }
-  
-  # 在所有因数对中找出行和列差距最小的
-  min_diff <- Inf
-  best_layout <- c(1, n)  # 默认为1行n列
-  
-  for (f in factors) {
-    diff <- abs(f[1] - f[2])
-    if (diff < min_diff) {
-      min_diff <- diff
-      # 通常我们希望列数大于行数，更符合宽屏显示习惯
-      if (f[2] >= f[1]) {
-        best_layout <- c(f[1], f[2])  # 行,列
-      } else {
-        best_layout <- c(f[2], f[1])  # 行,列
-      }
-    }
-  }
-  
-  # 对于10个站点的特殊情况，手动返回2行5列
-  if (n == 10) {
-    return(c(2, 5))
-  }
-  
-  return(best_layout)
-}
-
-# 方案1: 使用智能布局算法处理多达25个站点
+# 简化版本 - 直接使用固定布局，避免可能的错误
 if(length(unique_sites) <= 25) {
-  # 使用优化的布局算法
-  layout_dims <- calculate_optimal_layout(length(unique_sites))
-  n_rows <- layout_dims[1]
-  n_cols <- layout_dims[2]
+  # 为10个站点固定使用2行5列布局
+  n_rows <- 2
+  n_cols <- 5
   
-  cat("为", length(unique_sites), "个站点计算的最佳布局是:", n_rows, "行 x", n_cols, "列\n")
+  cat("使用固定布局:", n_rows, "行 x", n_cols, "列\n")
   
   # 创建一个包含所有子图的列表
-  plot_list <- map(unique_sites, create_site_plot)
+  plot_list <- lapply(unique_sites, create_site_plot)
   
-  # 合并为一个大图表
-  combined_plot <- subplot(
-    plot_list,
-    nrows = n_rows,
-    ncols = n_cols,  # 显式指定列数
-    shareX = FALSE,
-    shareY = FALSE,
-    titleX = TRUE,
-    titleY = TRUE
-  ) %>%
-    layout(
-      title = '各站点等待时间趋势',
-      showlegend = TRUE,
-      legend = list(orientation = 'h', x = 0.5, y = 1.05, xanchor = 'center'),
-      margin = list(t = 80)
-    )
+  # 使用更安全的subplot方法
+  tryCatch({
+    # 尝试创建子图
+    combined_plot <- subplot(
+      plot_list,
+      nrows = n_rows,
+      shareX = FALSE,
+      shareY = FALSE
+    ) %>%
+      layout(
+        title = '各站点等待时间趋势',
+        showlegend = TRUE,
+        margin = list(t = 80)
+      )
+    
+    # 显示图表
+    print(combined_plot)
+  }, error = function(e) {
+    # 如果出错，打印错误信息并尝试备用方法
+    cat("创建子图时出错:", e$message, "\n")
+    cat("尝试备用方法...\n")
+    
+    # 备用方法: 使用简单图表
+    simple_plot <- create_site_plot(unique_sites[1])
+    print(simple_plot)
+  })
   
-  # 显示图表
-  print(combined_plot)
-  
-  # 可选：保存图表为HTML文件，这样可以在浏览器中交互
-  # htmlwidgets::saveWidget(combined_plot, "站点等待时间趋势.html")
 } else {
-  # 方案2: 如果站点太多，创建一个带有下拉选择器的图表
-  # 创建一个初始图表
+  # 下拉菜单方式保持不变
   initial_site <- unique_sites[1]
   initial_plot <- create_site_plot(initial_site)
   
@@ -209,7 +170,4 @@ if(length(unique_sites) <= 25) {
   
   # 显示图表
   print(dropdown_plot)
-  
-  # 可选：保存图表为HTML文件
-  # htmlwidgets::saveWidget(dropdown_plot, "站点等待时间趋势.html")
 }
