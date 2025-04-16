@@ -4,8 +4,17 @@ library(dplyr)
 library(tidyr)
 library(purrr)
 
-# 在PowerBI的R脚本中，数据自动作为"dataset"加载
-# 确保列名匹配你的实际数据
+# 创建测试数据集（替代读取Excel文件）
+dataset <- data.frame(
+  OPE_NO = rep(c("站点1", "站点2", "站点3", "站点4", "站点5", 
+                 "站点6", "站点7", "站点8", "站点9", "站点10"), each = 5),
+  WEEK = rep(paste0("W", 513:517), 10),
+  AVG_WAIT = round(runif(50, 2, 10), 2),
+  MAX_WAIT = round(runif(50, 8, 20), 2)
+)
+
+# 查看数据前几行
+head(dataset)
 
 # 计算唯一站点数量
 unique_sites <- unique(dataset$OPE_NO)
@@ -50,11 +59,56 @@ create_site_plot <- function(site_id) {
   return(p)
 }
 
-# 方案1: 如果站点数量较少，创建一个带有子图的大图表
-if(length(unique_sites) <= 9) {
-  # 确定子图布局
-  n_cols <- min(3, length(unique_sites))
-  n_rows <- ceiling(length(unique_sites) / n_cols)
+# 智能计算子图布局函数
+calculate_optimal_layout <- function(n) {
+  # 获取所有可能的因数对
+  factors <- list()
+  for (i in 1:floor(sqrt(n))) {
+    if (n %% i == 0) {
+      factors[[length(factors) + 1]] <- c(i, n/i)
+    }
+  }
+  
+  # 如果完全没有因数对（如质数），则使用接近的数字
+  if (length(factors) == 0) {
+    cols <- floor(sqrt(n))
+    rows <- ceiling(n/cols)
+    return(c(rows, cols))
+  }
+  
+  # 在所有因数对中找出行和列差距最小的
+  min_diff <- Inf
+  best_layout <- c(1, n)  # 默认为1行n列
+  
+  for (f in factors) {
+    diff <- abs(f[1] - f[2])
+    if (diff < min_diff) {
+      min_diff <- diff
+      # 通常我们希望列数大于行数，更符合宽屏显示习惯
+      if (f[2] >= f[1]) {
+        best_layout <- c(f[1], f[2])  # 行,列
+      } else {
+        best_layout <- c(f[2], f[1])  # 行,列
+      }
+    }
+  }
+  
+  # 对于10个站点的特殊情况，手动返回2行5列
+  if (n == 10) {
+    return(c(2, 5))
+  }
+  
+  return(best_layout)
+}
+
+# 方案1: 使用智能布局算法处理多达25个站点
+if(length(unique_sites) <= 25) {
+  # 使用优化的布局算法
+  layout_dims <- calculate_optimal_layout(length(unique_sites))
+  n_rows <- layout_dims[1]
+  n_cols <- layout_dims[2]
+  
+  cat("为", length(unique_sites), "个站点计算的最佳布局是:", n_rows, "行 x", n_cols, "列\n")
   
   # 创建一个包含所有子图的列表
   plot_list <- map(unique_sites, create_site_plot)
@@ -63,6 +117,7 @@ if(length(unique_sites) <= 9) {
   combined_plot <- subplot(
     plot_list,
     nrows = n_rows,
+    ncols = n_cols,  # 显式指定列数
     shareX = FALSE,
     shareY = FALSE,
     titleX = TRUE,
@@ -75,7 +130,11 @@ if(length(unique_sites) <= 9) {
       margin = list(t = 80)
     )
   
-  combined_plot
+  # 显示图表
+  print(combined_plot)
+  
+  # 可选：保存图表为HTML文件，这样可以在浏览器中交互
+  # htmlwidgets::saveWidget(combined_plot, "站点等待时间趋势.html")
 } else {
   # 方案2: 如果站点太多，创建一个带有下拉选择器的图表
   # 创建一个初始图表
@@ -88,7 +147,7 @@ if(length(unique_sites) <= 9) {
       list(
         method = "update",
         args = list(
-          list(visible = unique_sites == site),
+          list(visible = rep(FALSE, length(unique_sites) * 2)),
           list(title = paste0('站点 ', site, ' 等待时间'))
         ),
         label = paste0('站点 ', site)
@@ -101,6 +160,16 @@ if(length(unique_sites) <= 9) {
     xanchor = 'left',
     yanchor = 'top'
   )
+  
+  # 修复下拉选择器的visible属性设置
+  for(i in seq_along(unique_sites)) {
+    site <- unique_sites[i]
+    # 更新该站点的visible属性
+    visible_vec <- rep(FALSE, length(unique_sites) * 2)
+    visible_vec[(i-1)*2 + 1] <- TRUE  # AVG_WAIT trace
+    visible_vec[(i-1)*2 + 2] <- TRUE  # MAX_WAIT trace
+    site_dropdown$buttons[[i]]$args[[1]] <- list(visible = visible_vec)
+  }
   
   # 应用下拉选择器
   dropdown_plot <- initial_plot %>%
@@ -138,5 +207,9 @@ if(length(unique_sites) <= 9) {
       )
   }
   
-  dropdown_plot
+  # 显示图表
+  print(dropdown_plot)
+  
+  # 可选：保存图表为HTML文件
+  # htmlwidgets::saveWidget(dropdown_plot, "站点等待时间趋势.html")
 }
