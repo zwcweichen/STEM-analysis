@@ -1,0 +1,131 @@
+# 导入必要的库
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+# 注意：在Power BI中，数据会自动作为"dataset"变量传入
+# 以下代码假设我们已经有了一个名为dataset的DataFrame
+# 如果你在Power BI外测试，可以创建一个模拟数据集
+
+# 如果在Power BI外测试，取消注释以下代码以创建示例数据
+'''
+# 创建示例数据
+np.random.seed(42)
+categories = ['电子产品', '服装', '家居用品', '食品', '其他']
+regions = ['北部', '南部', '东部', '西部']
+dates = pd.date_range(start='2023-01-01', end='2023-12-31', freq='D')
+
+n_records = 1000
+dataset = pd.DataFrame({
+    '日期': np.random.choice(dates, n_records),
+    '类别': np.random.choice(categories, n_records),
+    '地区': np.random.choice(regions, n_records),
+    '销售额': np.random.normal(1000, 300, n_records).round(2),
+    '数量': np.random.randint(1, 50, n_records),
+    '客户满意度': np.random.normal(4, 0.5, n_records).round(1).clip(1, 5)
+})
+
+# 确保日期格式正确
+dataset['日期'] = pd.to_datetime(dataset['日期'])
+# 添加月份列以便按月聚合
+dataset['月份'] = dataset['日期'].dt.strftime('%Y-%m')
+'''
+
+# 数据准备 - 按类别和月份汇总销售额
+monthly_sales = dataset.groupby(['月份', '类别'])['销售额'].sum().reset_index()
+monthly_sales_pivot = monthly_sales.pivot(index='月份', columns='类别', values='销售额').reset_index()
+
+# 创建一个包含两个子图的图表：按类别划分的销售趋势和地区销售分布
+fig = make_subplots(
+    rows=2, cols=1,
+    subplot_titles=('按类别划分的月度销售趋势', '按地区和类别划分的销售分布'),
+    vertical_spacing=0.15,
+    specs=[[{"type": "scatter"}], [{"type": "bar"}]]
+)
+
+# 添加销售趋势线图 - 每个类别一条线
+colors = px.colors.qualitative.Plotly
+for i, category in enumerate(dataset['类别'].unique()):
+    category_data = monthly_sales[monthly_sales['类别'] == category]
+    fig.add_trace(
+        go.Scatter(
+            x=category_data['月份'],
+            y=category_data['销售额'],
+            mode='lines+markers',
+            name=category,
+            line=dict(color=colors[i % len(colors)], width=2),
+            hovertemplate='%{x}<br>销售额: %{y:,.0f}元<extra>' + category + '</extra>'
+        ),
+        row=1, col=1
+    )
+
+# 添加按地区和类别划分的销售柱状图
+region_category_sales = dataset.groupby(['地区', '类别'])['销售额'].sum().reset_index()
+
+for i, region in enumerate(dataset['地区'].unique()):
+    region_data = region_category_sales[region_category_sales['地区'] == region]
+    fig.add_trace(
+        go.Bar(
+            x=region_data['类别'],
+            y=region_data['销售额'],
+            name=region,
+            hovertemplate='%{x}<br>销售额: %{y:,.0f}元<extra>' + region + '</extra>'
+        ),
+        row=2, col=1
+    )
+
+# 添加气泡图来显示客户满意度、销量和销售额之间的关系
+satisfaction_data = dataset.groupby(['类别'])['客户满意度', '销售额', '数量'].mean().reset_index()
+
+# 更新布局
+fig.update_layout(
+    height=800,
+    width=900,
+    title='销售数据交互式仪表板',
+    title_x=0.5,
+    template='plotly_white',
+    legend=dict(
+        orientation="h",
+        yanchor="bottom",
+        y=1.02,
+        xanchor="right",
+        x=1
+    ),
+    hoverlabel=dict(
+        bgcolor="white",
+        font_size=12,
+        font_family="Arial"
+    )
+)
+
+# 更新x轴和y轴标签
+fig.update_xaxes(title_text='月份', row=1, col=1)
+fig.update_yaxes(title_text='销售额 (元)', row=1, col=1)
+fig.update_xaxes(title_text='产品类别', row=2, col=1)
+fig.update_yaxes(title_text='销售额 (元)', row=2, col=1)
+
+# 添加交互功能说明
+annotation_text = """交互功能:
+- 点击图例项目可隐藏/显示数据
+- 悬停查看详细数据
+- 双击图例项目可隔离查看
+- 拖动鼠标可放大区域
+- 双击图表可重置视图"""
+
+fig.add_annotation(
+    xref='paper', yref='paper',
+    x=0.01, y=0.01,
+    text=annotation_text,
+    showarrow=False,
+    font=dict(size=10),
+    align='left',
+    bgcolor='rgba(255, 255, 255, 0.8)',
+    bordercolor='rgba(0, 0, 0, 0.3)',
+    borderwidth=1,
+    borderpad=4
+)
+
+# 显示图表 - 这将在Power BI中渲染
+fig.show()
