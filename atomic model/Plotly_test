@@ -1,149 +1,107 @@
 # 导入必要的库
 import pandas as pd
-import numpy as np
-import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# 注意：在Power BI中，数据会自动作为"dataset"变量传入
-# 以下假设我们已经有了dataset
+# 检查数据集的列
+print("数据集的列名:", dataset.columns.tolist())
 
-# 数据准备 - 按类别和月份汇总销售额
-# 首先确保日期格式正确并添加月份列
-if 'date' in dataset.columns or '日期' in dataset.columns:
-    date_col = '日期' if '日期' in dataset.columns else 'date'
-    # 尝试将日期转换为datetime格式
-    try:
-        dataset[date_col] = pd.to_datetime(dataset[date_col])
-        # 添加月份列
-        dataset['月份'] = dataset[date_col].dt.strftime('%Y-%m')
-    except:
-        # 如果转换失败，尝试使用已有的月份列或创建虚拟月份
-        if '月份' not in dataset.columns:
-            dataset['月份'] = '全部'
-else:
-    # 如果没有日期列，添加一个虚拟月份列
-    dataset['月份'] = '全部'
-
-# 确保存在类别列
-category_col = '类别' if '类别' in dataset.columns else ('category' if 'category' in dataset.columns else '产品')
-if category_col not in dataset.columns:
-    dataset[category_col] = '全部产品'
+# 创建一个非常简单的图表，仅使用数据集中的第一列和第二列
+# 假设第一列是分类数据，第二列是数值数据
+try:
+    # 尝试获取前两列
+    col1 = dataset.columns[0]  # 第一列作为分类变量
+    col2 = dataset.columns[1]  # 第二列作为数值变量
     
-# 确保存在地区列
-region_col = '地区' if '地区' in dataset.columns else ('region' if 'region' in dataset.columns else '销售区域')
-if region_col not in dataset.columns:
-    dataset[region_col] = '全部地区'
-
-# 确保存在销售额列
-sales_col = '销售额' if '销售额' in dataset.columns else ('sales' if 'sales' in dataset.columns else 'revenue')
-if sales_col not in dataset.columns and 'value' in dataset.columns:
-    sales_col = 'value'
-
-# 确保存在数量列
-quantity_col = '数量' if '数量' in dataset.columns else ('quantity' if 'quantity' in dataset.columns else 'units')
-if quantity_col not in dataset.columns:
-    dataset[quantity_col] = 1
-
-# 确保存在满意度列
-satisfaction_col = '客户满意度' if '客户满意度' in dataset.columns else ('satisfaction' if 'satisfaction' in dataset.columns else 'rating')
-if satisfaction_col not in dataset.columns:
-    dataset[satisfaction_col] = 4  # 默认值
-
-# 按类别和月份汇总销售额 - 使用列表而非元组
-monthly_sales = dataset.groupby(['月份', category_col])[sales_col].sum().reset_index()
-
-# 创建一个包含两个子图的图表
-fig = make_subplots(
-    rows=2, cols=1,
-    subplot_titles=(f'按{category_col}划分的月度销售趋势', f'按{region_col}和{category_col}划分的销售分布'),
-    vertical_spacing=0.15,
-    specs=[[{"type": "scatter"}], [{"type": "bar"}]]
-)
-
-# 添加销售趋势线图 - 每个类别一条线
-colors = px.colors.qualitative.Plotly
-for i, category in enumerate(dataset[category_col].unique()):
-    category_data = monthly_sales[monthly_sales[category_col] == category]
+    # 打印选择的列名以便调试
+    print(f"使用的列: {col1}, {col2}")
     
-    # 使用列表选择列，而不是元组
-    fig.add_trace(
-        go.Scatter(
-            x=category_data['月份'].tolist(),  # 转换为列表
-            y=category_data[sales_col].tolist(),  # 转换为列表
-            mode='lines+markers',
-            name=category,
-            line=dict(color=colors[i % len(colors)], width=2),
-            hovertemplate='%{x}<br>' + sales_col + ': %{y:,.0f}<extra>' + str(category) + '</extra>'
-        ),
-        row=1, col=1
-    )
-
-# 添加按地区和类别划分的销售柱状图 - 使用列表而非元组
-# 用列表形式指定分组列
-region_category_sales = dataset.groupby([region_col, category_col])[sales_col].sum().reset_index()
-
-for i, region in enumerate(dataset[region_col].unique()):
-    region_data = region_category_sales[region_category_sales[region_col] == region]
+    # 创建一个简单的交互式图表
+    fig = go.Figure()
     
-    # 使用列表选择列，而不是元组
+    # 添加一个条形图
     fig.add_trace(
         go.Bar(
-            x=region_data[category_col].tolist(),  # 转换为列表
-            y=region_data[sales_col].tolist(),  # 转换为列表
-            name=region,
-            hovertemplate='%{x}<br>' + sales_col + ': %{y:,.0f}<extra>' + str(region) + '</extra>'
-        ),
-        row=2, col=1
+            x=dataset[col1],
+            y=dataset[col2],
+            marker_color='royalblue',
+            hovertemplate=
+            '<b>%{x}</b><br>' +
+            '值: %{y}<br>' +
+            '<extra></extra>'
+        )
     )
-
-# 更新布局
-fig.update_layout(
-    height=800,
-    width=900,
-    title='销售数据交互式仪表板',
-    title_x=0.5,
-    template='plotly_white',
-    legend=dict(
-        orientation="h",
-        yanchor="bottom",
-        y=1.02,
-        xanchor="right",
-        x=1
-    ),
-    hoverlabel=dict(
-        bgcolor="white",
-        font_size=12,
-        font_family="Arial"
+    
+    # 更新布局
+    fig.update_layout(
+        title=f"{col1} vs {col2} 交互式图表",
+        xaxis_title=col1,
+        yaxis_title=col2,
+        template='plotly_white',
+        height=600,
+        width=800
     )
-)
-
-# 更新x轴和y轴标签
-fig.update_xaxes(title_text='月份', row=1, col=1)
-fig.update_yaxes(title_text=sales_col, row=1, col=1)
-fig.update_xaxes(title_text=category_col, row=2, col=1)
-fig.update_yaxes(title_text=sales_col, row=2, col=1)
-
-# 添加交互功能说明
-annotation_text = """交互功能:
-- 点击图例项目可隐藏/显示数据
-- 悬停查看详细数据
-- 双击图例项目可隔离查看
-- 拖动鼠标可放大区域
-- 双击图表可重置视图"""
-
-fig.add_annotation(
-    xref='paper', yref='paper',
-    x=0.01, y=0.01,
-    text=annotation_text,
-    showarrow=False,
-    font=dict(size=10),
-    align='left',
-    bgcolor='rgba(255, 255, 255, 0.8)',
-    bordercolor='rgba(0, 0, 0, 0.3)',
-    borderwidth=1,
-    borderpad=4
-)
-
-# 显示图表 - 这将在Power BI中渲染
-fig.show()
+    
+    # 添加交互功能说明
+    fig.add_annotation(
+        xref='paper', yref='paper',
+        x=0.01, y=0.99,
+        text="交互功能:<br>- 悬停查看详细数据<br>- 拖动鼠标可放大区域<br>- 双击图表可重置视图<br>- 点击右上角工具栏可下载、平移等",
+        showarrow=False,
+        align='left',
+        bgcolor='rgba(255, 255, 255, 0.8)',
+        bordercolor='rgba(0, 0, 0, 0.3)',
+        borderwidth=1,
+        borderpad=4
+    )
+    
+    # 显示图表
+    fig.show()
+    
+except Exception as e:
+    # 如果出错，创建一个非常基础的图表，使用自定义数据
+    print(f"错误: {e}")
+    print("使用示例数据创建图表")
+    
+    # 创建示例数据
+    categories = ['A类', 'B类', 'C类', 'D类', 'E类']
+    values = [23, 45, 56, 78, 32]
+    
+    # 创建简单图表
+    fig = go.Figure(data=[
+        go.Bar(
+            x=categories,
+            y=values,
+            marker_color='lightgreen',
+            hovertemplate=
+            '<b>%{x}</b><br>' +
+            '值: %{y}<br>' +
+            '<extra></extra>'
+        )
+    ])
+    
+    # 更新布局
+    fig.update_layout(
+        title="示例交互式图表",
+        xaxis_title="类别",
+        yaxis_title="值",
+        template='plotly_white',
+        height=600,
+        width=800
+    )
+    
+    # 添加交互功能说明
+    fig.add_annotation(
+        xref='paper', yref='paper',
+        x=0.01, y=0.99,
+        text="交互功能:<br>- 悬停查看详细数据<br>- 拖动鼠标可放大区域<br>- 双击图表可重置视图<br>- 点击右上角工具栏可下载、平移等",
+        showarrow=False,
+        align='left',
+        bgcolor='rgba(255, 255, 255, 0.8)',
+        bordercolor='rgba(0, 0, 0, 0.3)',
+        borderwidth=1,
+        borderpad=4
+    )
+    
+    # 显示图表
+    fig.show()
