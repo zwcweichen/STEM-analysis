@@ -2,14 +2,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.colors import LinearSegmentedColormap, Normalize
-from scipy.interpolate import griddata, Rbf
-from scipy.ndimage import gaussian_filter
+from scipy.spatial.distance import cdist
 import matplotlib.patches as patches
 
 # 创建更精确的自定义colormap（更接近您系统的颜色）
 colors = ['#2E0854', '#1B4F9C', '#0080FF', '#00BFFF', '#40E0D0', '#7FFFD4', 
           '#ADFF2F', '#FFFF00', '#FFD700', '#FFA500', '#FF6347', '#FF0000', '#8B0000']
-n_bins = 512  # 增加颜色分辨率
+n_bins = 512
 cmap_custom = LinearSegmentedColormap.from_list('wafer_enhanced', colors, N=n_bins)
 
 def load_wafer_data(csv_file_path):
@@ -46,187 +45,289 @@ def load_wafer_data(csv_file_path):
         print(f"读取CSV文件时出错: {e}")
         return None, None, None
 
-def advanced_interpolation(x, y, z, xi, yi, method='multi'):
+def calculate_adaptive_radius(x, y, method='nearest_neighbor', factor=0.8):
     """
-    高级插值方法，结合多种技术获得更好的效果
+    自适应计算每个点的影响半径
+    
+    Parameters:
+    x, y: 坐标数组
+    method: 'nearest_neighbor', 'density_based', 'uniform'
+    factor: 调整因子
     """
-    if method == 'multi':
-        # 方法1: RBF插值（径向基函数）
-        try:
-            rbf = Rbf(x, y, z, function='multiquadric', smooth=0.1)
-            zi_rbf = rbf(xi, yi)
-        except:
-            zi_rbf = griddata((x, y), z, (xi, yi), method='cubic')
-        
-        # 方法2: 改进的griddata
-        try:
-            zi_cubic = griddata((x, y), z, (xi, yi), method='cubic')
-            zi_linear = griddata((x, y), z, (xi, yi), method='linear')
-            # 组合cubic和linear结果
-            mask_valid = ~np.isnan(zi_cubic)
-            zi_combined = np.where(mask_valid, zi_cubic, zi_linear)
-        except:
-            zi_combined = griddata((x, y), z, (xi, yi), method='linear')
-        
-        # 加权平均两种方法
-        weight_rbf = 0.6
-        weight_grid = 0.4
-        
-        # 处理NaN值
-        rbf_valid = ~np.isnan(zi_rbf)
-        grid_valid = ~np.isnan(zi_combined)
-        
-        zi_final = np.full_like(xi, np.nan)
-        both_valid = rbf_valid & grid_valid
-        zi_final[both_valid] = (weight_rbf * zi_rbf[both_valid] + 
-                               weight_grid * zi_combined[both_valid])
-        
-        # 只有一个有效的情况
-        only_rbf = rbf_valid & ~grid_valid
-        only_grid = ~rbf_valid & grid_valid
-        zi_final[only_rbf] = zi_rbf[only_rbf]
-        zi_final[only_grid] = zi_combined[only_grid]
-        
-        return zi_final
+    if method == 'nearest_neighbor':
+        # 基于最近邻距离
+        points = np.column_stack([x, y])
+        distances = cdist(points, points)
+        np.fill_diagonal(distances, np.inf)  # 排除自己
+        nearest_distances = np.min(distances, axis=1)
+        # 使用最近邻距离的一定比例作为影响半径
+        radii = nearest_distances * factor
+        return radii
     
-    elif method == 'rbf':
-        rbf = Rbf(x, y, z, function='multiquadric', smooth=0.1)
-        return rbf(xi, yi)
+    elif method == 'density_based':
+        # 基于局部密度
+        points = np.column_stack([x, y])
+        distances = cdist(points, points)
+        # 计算每个点周围的平均距离
+        avg_distances = np.mean(distances, axis=1)
+        radii = avg_distances * factor
+        return radii
     
-    else:
-        return griddata((x, y), z, (xi, yi), method=method)
+    else:  # uniform
+        # 统一半径
+        x_range = x.max() - x.min()
+        y_range = y.max() - y.min()
+        uniform_radius = min(x_range, y_range) / (np.sqrt(len(x)) * 2) * factor
+        return np.full(len(x), uniform_radius)
 
-def create_enhanced_wafer_mask(xi, yi, x_data, y_data, buffer_ratio=0.05):
-    """创建增强的wafer遮罩，更准确地反映数据分布"""
-    # 计算数据的实际边界
-    x_range = x_data.max() - x_data.min()
-    y_range = y_data.max() - y_data.min()
+def site_based_radial_interpolation(x_data, y_data, z_data, xi, yi, 
+                                  radius_method='nearest_neighbor', 
+                                  influence_function='gaussian',
+                                  radius_factor=1.2):
+    """
+    基于站点的径向插值（模仿系统的圆形叠加效果）
     
-    # 计算中心和半径
+    Parameters:
+    x_data, y_data, z_data: 原始数据点
+    xi, yi: 插值网格
+    radius_method: 半径计算方法
+    influence_function: 影响函数类型 ('gaussian', 'linear', 'exponential')
+    radius_factor: 半径调整因子
+    """
+    print(f"正在进行基于站点的径向插值...")
+    
+    # 计算每个数据点的影响半径
+    radii = calculate_adaptive_radius(x_data, y_data, method=radius_method, factor=radius_factor)
+    
+    # 初始化插值结果
+    zi = np.zeros_like(xi)
+    weights_sum = np.zeros_like(xi)
+    
+    # 对每个数据点计算其对网格的影响
+    for i, (x_point, y_point, z_point, radius) in enumerate(zip(x_data, y_data, z_data, radii)):
+        # 计算距离
+        distances = np.sqrt((xi - x_point)**2 + (yi - y_point)**2)
+        
+        # 计算权重（根据影响函数）
+        if influence_function == 'gaussian':
+            # 高斯函数
+            sigma = radius / 3.0  # 3σ原则
+            weights = np.exp(-(distances**2) / (2 * sigma**2))
+        elif influence_function == 'linear':
+            # 线性衰减
+            weights = np.maximum(0, 1 - distances / radius)
+        elif influence_function == 'exponential':
+            # 指数衰减
+            weights = np.exp(-distances / radius)
+        else:
+            # 默认高斯
+            sigma = radius / 3.0
+            weights = np.exp(-(distances**2) / (2 * sigma**2))
+        
+        # 只在影响范围内计算
+        mask = distances <= radius * 3  # 3倍半径内有影响
+        weights[~mask] = 0
+        
+        # 累加加权值
+        zi += weights * z_point
+        weights_sum += weights
+    
+    # 归一化
+    mask_valid = weights_sum > 1e-10
+    zi[mask_valid] = zi[mask_valid] / weights_sum[mask_valid]
+    zi[~mask_valid] = np.nan
+    
+    return zi, radii
+
+def create_wafer_boundary(xi, yi, x_data, y_data, buffer_ratio=0.05):
+    """创建wafer边界"""
+    # 计算数据的实际边界
     center_x = (x_data.max() + x_data.min()) / 2
     center_y = (y_data.max() + y_data.min()) / 2
     
-    # 使用实际数据点来确定更准确的wafer边界
+    # 使用实际数据点来确定wafer边界
     distances = np.sqrt((x_data - center_x)**2 + (y_data - center_y)**2)
-    radius = np.percentile(distances, 95)  # 使用95%分位数作为半径
+    radius = np.percentile(distances, 98)  # 使用98%分位数
     
-    # 创建平滑的圆形遮罩
+    # 创建circular mask
     dist_from_center = np.sqrt((xi - center_x)**2 + (yi - center_y)**2)
-    
-    # 软边界遮罩（渐变边缘）
-    edge_width = radius * 0.05  # 边缘宽度为半径的5%
-    mask = np.ones_like(xi)
-    
-    # 内部区域
-    inner_mask = dist_from_center <= radius - edge_width
-    mask[inner_mask] = 1.0
-    
-    # 边缘区域（渐变）
-    edge_mask = (dist_from_center > radius - edge_width) & (dist_from_center <= radius + edge_width)
-    fade_factor = 1.0 - (dist_from_center[edge_mask] - (radius - edge_width)) / (2 * edge_width)
-    mask[edge_mask] = fade_factor
-    
-    # 外部区域
-    outer_mask = dist_from_center > radius + edge_width
-    mask[outer_mask] = 0.0
+    mask = dist_from_center <= radius
     
     return mask, center_x, center_y, radius
 
-def plot_enhanced_continuous_wafer_map(x, y, z, title="Enhanced Continuous Wafer Map", figsize=(12, 10)):
-    """绘制增强版连续性wafer map"""
+def plot_site_based_wafer_map(x, y, z, title="Site-Based Radial Wafer Map", 
+                             figsize=(14, 12), show_sites=True, show_circles=False):
+    """
+    绘制基于站点的径向wafer map（模仿系统效果）
+    
+    Parameters:
+    show_sites: 是否显示原始测量点和数值
+    show_circles: 是否显示影响圆圈（用于调试）
+    """
     fig, ax = plt.subplots(1, 1, figsize=figsize)
     
-    # 使用更高的分辨率
-    grid_density = 400  # 增加分辨率
-    xi = np.linspace(x.min() * 1.1, x.max() * 1.1, grid_density)
-    yi = np.linspace(y.min() * 1.1, y.max() * 1.1, grid_density)
+    # 创建高分辨率网格
+    grid_density = 500
+    margin_factor = 0.1
+    x_margin = (x.max() - x.min()) * margin_factor
+    y_margin = (y.max() - y.min()) * margin_factor
+    
+    xi = np.linspace(x.min() - x_margin, x.max() + x_margin, grid_density)
+    yi = np.linspace(y.min() - y_margin, y.max() + y_margin, grid_density)
     Xi, Yi = np.meshgrid(xi, yi)
     
-    # 使用改进的插值方法
-    print("正在进行高质量插值...")
-    Zi = advanced_interpolation(x, y, z, Xi, Yi, method='multi')
+    # 使用基于站点的径向插值
+    Zi, radii = site_based_radial_interpolation(x, y, z, Xi, Yi, 
+                                               radius_method='nearest_neighbor',
+                                               influence_function='gaussian',
+                                               radius_factor=1.0)
     
-    # 应用高斯平滑
-    Zi_smooth = gaussian_filter(Zi, sigma=1.0)
+    # 创建wafer边界
+    mask, center_x, center_y, radius = create_wafer_boundary(Xi, Yi, x, y)
+    Zi[~mask] = np.nan
     
-    # 创建增强的wafer遮罩
-    mask, center_x, center_y, radius = create_enhanced_wafer_mask(Xi, Yi, x, y)
-    
-    # 应用遮罩
-    Zi_masked = np.where(mask > 0.1, Zi_smooth, np.nan)
-    
-    # 创建更精细的等高线级别
-    z_min, z_max = np.nanmin(z), np.nanmax(z)
+    # 绘制基础热力图
+    z_min, z_max = z.min(), z.max()
     levels = np.linspace(z_min, z_max, 100)
     
-    # 绘制填充等高线
-    contour = ax.contourf(Xi, Yi, Zi_masked, levels=levels, cmap=cmap_custom, 
-                         extend='both', alpha=0.9)
+    contour = ax.contourf(Xi, Yi, Zi, levels=levels, cmap=cmap_custom, 
+                         extend='both', alpha=0.85)
     
-    # 添加更细致的等高线
-    contour_lines = ax.contour(Xi, Yi, Zi_masked, levels=30, colors='black', 
-                              alpha=0.15, linewidths=0.3)
+    # 可选：显示影响圆圈（调试用）
+    if show_circles:
+        for i, (x_point, y_point, radius_point) in enumerate(zip(x, y, radii)):
+            if i % 3 == 0:  # 只显示部分圆圈避免太乱
+                circle = plt.Circle((x_point, y_point), radius_point, 
+                                  fill=False, color='white', alpha=0.3, linewidth=0.5)
+                ax.add_patch(circle)
     
-    # 绘制原始数据点，使用更好的样式
-    scatter = ax.scatter(x, y, c=z, s=25, cmap=cmap_custom, 
-                        edgecolors='white', linewidth=0.8, alpha=0.95, zorder=5)
+    # 显示原始测量点和数值（模仿系统效果）
+    if show_sites:
+        # 绘制测量点
+        scatter = ax.scatter(x, y, c=z, s=35, cmap=cmap_custom, 
+                           edgecolors='black', linewidth=1.0, alpha=0.95, zorder=10)
+        
+        # 添加数值标签（重要！这是系统图的关键特征）
+        for i, (x_point, y_point, z_point) in enumerate(zip(x, y, z)):
+            # 根据背景颜色选择文字颜色
+            norm_value = (z_point - z_min) / (z_max - z_min)
+            text_color = 'white' if norm_value < 0.4 or norm_value > 0.8 else 'black'
+            
+            ax.text(x_point, y_point + radii[i] * 0.7, f'{z_point:.1f}', 
+                   ha='center', va='center', fontsize=7, fontweight='bold',
+                   color=text_color, zorder=15,
+                   bbox=dict(boxstyle='round,pad=0.2', facecolor='white', 
+                           alpha=0.7, edgecolor='none'))
     
     # 添加wafer边界圆
-    circle = plt.Circle((center_x, center_y), radius, fill=False, 
-                       color='black', linewidth=2.5, alpha=0.8)
-    ax.add_patch(circle)
+    circle_boundary = plt.Circle((center_x, center_y), radius, fill=False, 
+                               color='black', linewidth=3, alpha=0.8)
+    ax.add_patch(circle_boundary)
     
-    # 美化颜色条
+    # 设置坐标轴
+    ax.set_xlim(x.min() - x_margin * 0.5, x.max() + x_margin * 0.5)
+    ax.set_ylim(y.min() - y_margin * 0.5, y.max() + y_margin * 0.5)
+    ax.set_aspect('equal')
+    
+    # 美化
+    ax.set_title(title, fontsize=16, fontweight='bold', pad=20)
+    ax.set_xlabel('Location X (mm)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Location Y (mm)', fontsize=12, fontweight='bold')
+    ax.grid(True, alpha=0.2, linestyle='-', linewidth=0.5)
+    ax.tick_params(labelsize=10)
+    
+    # 添加颜色条
     cbar = plt.colorbar(contour, ax=ax, shrink=0.8, pad=0.02)
     cbar.set_label('CD Value (nm)', fontsize=12, fontweight='bold')
     cbar.ax.tick_params(labelsize=10)
     
-    # 设置坐标轴
-    margin = max((x.max() - x.min()), (y.max() - y.min())) * 0.05
-    ax.set_xlim(x.min() - margin, x.max() + margin)
-    ax.set_ylim(y.min() - margin, y.max() + margin)
-    ax.set_aspect('equal')
-    
-    # 美化标题和标签
-    ax.set_title(title, fontsize=16, fontweight='bold', pad=20)
-    ax.set_xlabel('Location X (mm)', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Location Y (mm)', fontsize=12, fontweight='bold')
-    
-    # 添加网格
-    ax.grid(True, alpha=0.2, linestyle='--')
-    ax.tick_params(labelsize=10)
-    
-    # 添加统计信息框
+    # 添加统计信息
     stats_text = (f'Data Points: {len(x)}\n'
                  f'Mean CD: {np.mean(z):.2f} nm\n'
                  f'Std Dev: {np.std(z):.2f} nm\n'
                  f'Range: {z.min():.2f} - {z.max():.2f} nm\n'
-                 f'3σ Range: {np.mean(z) - 3*np.std(z):.2f} - {np.mean(z) + 3*np.std(z):.2f} nm')
+                 f'Method: Site-Based Radial')
     
     ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=9,
             verticalalignment='top', bbox=dict(boxstyle='round,pad=0.5', 
-            facecolor='white', alpha=0.8, edgecolor='gray'))
+            facecolor='white', alpha=0.9, edgecolor='gray'))
     
     plt.tight_layout()
     return fig
 
-def plot_enhanced_discrete_wafer_map(x, y, z, grid_size=None, title="Enhanced Discrete Wafer Map", figsize=(12, 10)):
-    """绘制增强版离散网格wafer map"""
+def plot_comparison_interpolation_methods(x, y, z, figsize=(20, 12)):
+    """比较不同插值方法的效果"""
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    
+    # 创建网格
+    grid_density = 300
+    margin_factor = 0.05
+    x_margin = (x.max() - x.min()) * margin_factor
+    y_margin = (y.max() - y.min()) * margin_factor
+    
+    xi = np.linspace(x.min() - x_margin, x.max() + x_margin, grid_density)
+    yi = np.linspace(y.min() - y_margin, y.max() + y_margin, grid_density)
+    Xi, Yi = np.meshgrid(xi, yi)
+    
+    # 方法列表
+    methods = [
+        ('nearest_neighbor', 'gaussian', '基于最近邻的高斯核'),
+        ('density_based', 'gaussian', '基于密度的高斯核'),
+        ('uniform', 'gaussian', '统一半径高斯核'),
+        ('nearest_neighbor', 'linear', '基于最近邻的线性衰减')
+    ]
+    
+    z_min, z_max = z.min(), z.max()
+    levels = np.linspace(z_min, z_max, 50)
+    
+    for idx, (radius_method, influence_func, method_name) in enumerate(methods):
+        ax = axes[idx // 2, idx % 2]
+        
+        # 插值
+        Zi, radii = site_based_radial_interpolation(x, y, z, Xi, Yi,
+                                                   radius_method=radius_method,
+                                                   influence_function=influence_func)
+        
+        # 应用wafer边界
+        mask, center_x, center_y, radius = create_wafer_boundary(Xi, Yi, x, y)
+        Zi[~mask] = np.nan
+        
+        # 绘制
+        contour = ax.contourf(Xi, Yi, Zi, levels=levels, cmap=cmap_custom, extend='both')
+        ax.scatter(x, y, c=z, s=20, cmap=cmap_custom, edgecolors='white', 
+                  linewidth=0.5, alpha=0.9, zorder=5)
+        
+        # 添加边界
+        circle = plt.Circle((center_x, center_y), radius, fill=False, 
+                          color='black', linewidth=2)
+        ax.add_patch(circle)
+        
+        ax.set_aspect('equal')
+        ax.set_title(method_name, fontsize=12, fontweight='bold')
+        ax.grid(True, alpha=0.2)
+        
+        # 只在最后一个子图添加颜色条
+        if idx == 3:
+            cbar = plt.colorbar(contour, ax=ax, shrink=0.8)
+            cbar.set_label('CD Value (nm)', fontsize=10)
+    
+    plt.tight_layout()
+    return fig
+
+def plot_discrete_with_site_values(x, y, z, grid_size=None, title="Discrete Map with Site Values", figsize=(12, 10)):
+    """绘制带站点数值的离散图"""
     fig, ax = plt.subplots(1, 1, figsize=figsize)
     
     if grid_size is None:
-        # 智能计算网格大小
-        data_density = len(x) / ((x.max() - x.min()) * (y.max() - y.min()))
-        grid_size = min(max(int(np.sqrt(len(x) * 0.8)), 10), 25)
+        grid_size = min(max(int(np.sqrt(len(x) * 0.8)), 10), 20)
     
     # 创建网格
     x_bins = np.linspace(x.min(), x.max(), grid_size + 1)
     y_bins = np.linspace(y.min(), y.max(), grid_size + 1)
     
-    # 计算每个网格的统计值
+    # 分配数据到网格
     grid_data = np.full((grid_size, grid_size), np.nan)
     grid_counts = np.zeros((grid_size, grid_size))
-    grid_std = np.full((grid_size, grid_size), np.nan)
     
     for i in range(len(x)):
         x_idx = np.digitize(x[i], x_bins) - 1
@@ -237,20 +338,18 @@ def plot_enhanced_discrete_wafer_map(x, y, z, grid_size=None, title="Enhanced Di
                 grid_data[y_idx, x_idx] = z[i]
                 grid_counts[y_idx, x_idx] = 1
             else:
-                # 计算运行平均值
                 old_mean = grid_data[y_idx, x_idx]
                 grid_counts[y_idx, x_idx] += 1
                 grid_data[y_idx, x_idx] = old_mean + (z[i] - old_mean) / grid_counts[y_idx, x_idx]
     
-    # 创建wafer形状遮罩
+    # 创建wafer形状
     center_x = grid_size / 2
     center_y = grid_size / 2
-    radius = grid_size / 2 * 0.85  # 稍微缩小以匹配实际形状
+    radius = grid_size / 2 * 0.85
     
-    # 绘制增强的网格
+    # 绘制网格
     for i in range(grid_size):
         for j in range(grid_size):
-            # 检查是否在wafer范围内
             dist_to_center = np.sqrt((j - center_x)**2 + (i - center_y)**2)
             if dist_to_center <= radius and not np.isnan(grid_data[i, j]):
                 # 计算颜色
@@ -264,13 +363,21 @@ def plot_enhanced_discrete_wafer_map(x, y, z, grid_size=None, title="Enhanced Di
                                             facecolor=color, alpha=0.9)
                 ax.add_patch(rect)
                 
-                # 添加数值标签，根据网格大小调整字体
+                # 添加数值标签
                 font_size = max(6, min(10, 120 // grid_size))
-                text_color = 'white' if norm_value < 0.5 else 'black'  # 根据背景调整文字颜色
+                text_color = 'white' if norm_value < 0.4 or norm_value > 0.8 else 'black'
                 
                 ax.text(j, grid_size-1-i, f'{grid_data[i, j]:.1f}', 
                        ha='center', va='center', fontsize=font_size, 
                        fontweight='bold', color=text_color)
+    
+    # 绘制原始数据点位置（小圆点）
+    for i in range(len(x)):
+        x_idx = (x[i] - x.min()) / (x.max() - x.min()) * (grid_size - 1)
+        y_idx = (y[i] - y.min()) / (y.max() - y.min()) * (grid_size - 1)
+        y_plot = grid_size - 1 - y_idx  # 翻转Y轴
+        
+        ax.plot(x_idx, y_plot, 'ko', markersize=3, alpha=0.7)
     
     # 设置坐标轴
     ax.set_xlim(-0.7, grid_size - 0.3)
@@ -279,136 +386,25 @@ def plot_enhanced_discrete_wafer_map(x, y, z, grid_size=None, title="Enhanced Di
     
     # 添加网格线
     for i in range(grid_size + 1):
-        ax.axhline(i - 0.5, color='gray', linewidth=0.5, alpha=0.3)
-        ax.axvline(i - 0.5, color='gray', linewidth=0.5, alpha=0.3)
+        ax.axhline(i - 0.5, color='gray', linewidth=0.3, alpha=0.4)
+        ax.axvline(i - 0.5, color='gray', linewidth=0.3, alpha=0.4)
     
-    # 设置刻度
-    ax.set_xticks(range(grid_size))
-    ax.set_yticks(range(grid_size))
-    ax.set_xticklabels([f'{i}' for i in range(grid_size)])
-    ax.set_yticklabels([f'{grid_size-1-i}' for i in range(grid_size)])
-    
-    # 美化标题和标签
-    ax.set_title(title, fontsize=16, fontweight='bold', pad=20)
-    ax.set_xlabel('X Grid Index', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Y Grid Index', fontsize=12, fontweight='bold')
-    ax.tick_params(labelsize=10)
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.set_xlabel('X Grid Index', fontsize=11)
+    ax.set_ylabel('Y Grid Index', fontsize=11)
     
     # 添加颜色条
     sm = plt.cm.ScalarMappable(cmap=cmap_custom, norm=Normalize(vmin=z.min(), vmax=z.max()))
     sm.set_array([])
-    cbar = plt.colorbar(sm, ax=ax, shrink=0.8, pad=0.02)
-    cbar.set_label('CD Value (nm)', fontsize=12, fontweight='bold')
-    cbar.ax.tick_params(labelsize=10)
+    cbar = plt.colorbar(sm, ax=ax, shrink=0.8)
+    cbar.set_label('CD Value (nm)', fontsize=11)
     
     plt.tight_layout()
     return fig
 
-def plot_enhanced_comparison(x, y, z, figsize=(20, 9)):
-    """绘制增强版对比图"""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
-    
-    # === 左图：增强连续性图 ===
-    grid_density = 300
-    xi = np.linspace(x.min() * 1.05, x.max() * 1.05, grid_density)
-    yi = np.linspace(y.min() * 1.05, y.max() * 1.05, grid_density)
-    Xi, Yi = np.meshgrid(xi, yi)
-    
-    # 高质量插值
-    Zi = advanced_interpolation(x, y, z, Xi, Yi, method='multi')
-    Zi_smooth = gaussian_filter(Zi, sigma=0.8)
-    
-    # wafer遮罩
-    mask, center_x, center_y, radius = create_enhanced_wafer_mask(Xi, Yi, x, y)
-    Zi_masked = np.where(mask > 0.1, Zi_smooth, np.nan)
-    
-    # 绘制
-    z_min, z_max = np.nanmin(z), np.nanmax(z)
-    levels = np.linspace(z_min, z_max, 80)
-    
-    contour1 = ax1.contourf(Xi, Yi, Zi_masked, levels=levels, cmap=cmap_custom, extend='both')
-    ax1.contour(Xi, Yi, Zi_masked, levels=25, colors='black', alpha=0.1, linewidths=0.3)
-    ax1.scatter(x, y, c=z, s=20, cmap=cmap_custom, edgecolors='white', 
-               linewidth=0.6, alpha=0.9, zorder=5)
-    
-    circle1 = plt.Circle((center_x, center_y), radius, fill=False, 
-                        color='black', linewidth=2, alpha=0.8)
-    ax1.add_patch(circle1)
-    
-    margin = max((x.max() - x.min()), (y.max() - y.min())) * 0.03
-    ax1.set_xlim(x.min() - margin, x.max() + margin)
-    ax1.set_ylim(y.min() - margin, y.max() + margin)
-    ax1.set_aspect('equal')
-    ax1.set_title('Enhanced Continuous Wafer Map', fontsize=14, fontweight='bold')
-    ax1.grid(True, alpha=0.2, linestyle='--')
-    ax1.set_xlabel('Location X (mm)', fontsize=11)
-    ax1.set_ylabel('Location Y (mm)', fontsize=11)
-    
-    # === 右图：增强离散图 ===
-    grid_size = 16
-    x_bins = np.linspace(x.min(), x.max(), grid_size + 1)
-    y_bins = np.linspace(y.min(), y.max(), grid_size + 1)
-    
-    grid_data = np.full((grid_size, grid_size), np.nan)
-    grid_counts = np.zeros((grid_size, grid_size))
-    
-    for i in range(len(x)):
-        x_idx = np.digitize(x[i], x_bins) - 1
-        y_idx = np.digitize(y[i], y_bins) - 1
-        if 0 <= x_idx < grid_size and 0 <= y_idx < grid_size:
-            if grid_counts[y_idx, x_idx] == 0:
-                grid_data[y_idx, x_idx] = z[i]
-                grid_counts[y_idx, x_idx] = 1
-            else:
-                old_mean = grid_data[y_idx, x_idx]
-                grid_counts[y_idx, x_idx] += 1
-                grid_data[y_idx, x_idx] = old_mean + (z[i] - old_mean) / grid_counts[y_idx, x_idx]
-    
-    center_x_grid = grid_size / 2
-    center_y_grid = grid_size / 2
-    radius_grid = grid_size / 2 * 0.85
-    
-    for i in range(grid_size):
-        for j in range(grid_size):
-            dist_to_center = np.sqrt((j - center_x_grid)**2 + (i - center_y_grid)**2)
-            if dist_to_center <= radius_grid and not np.isnan(grid_data[i, j]):
-                norm_value = (grid_data[i, j] - z.min()) / (z.max() - z.min())
-                color = cmap_custom(norm_value)
-                
-                rect = patches.FancyBboxPatch((j-0.45, grid_size-1-i-0.45), 0.9, 0.9,
-                                            boxstyle="round,pad=0.02",
-                                            linewidth=1, edgecolor='white', 
-                                            facecolor=color, alpha=0.9)
-                ax2.add_patch(rect)
-                
-                text_color = 'white' if norm_value < 0.5 else 'black'
-                ax2.text(j, grid_size-1-i, f'{grid_data[i, j]:.0f}', 
-                        ha='center', va='center', fontsize=8, 
-                        fontweight='bold', color=text_color)
-    
-    ax2.set_xlim(-0.7, grid_size - 0.3)
-    ax2.set_ylim(-0.7, grid_size - 0.3)
-    ax2.set_aspect('equal')
-    ax2.set_title('Enhanced Discrete Wafer Map', fontsize=14, fontweight='bold')
-    
-    for i in range(grid_size + 1):
-        ax2.axhline(i - 0.5, color='gray', linewidth=0.3, alpha=0.4)
-        ax2.axvline(i - 0.5, color='gray', linewidth=0.3, alpha=0.4)
-    
-    ax2.set_xlabel('X Grid Index', fontsize=11)
-    ax2.set_ylabel('Y Grid Index', fontsize=11)
-    
-    # 共享颜色条
-    cbar = fig.colorbar(contour1, ax=[ax1, ax2], shrink=0.8, pad=0.08)
-    cbar.set_label('CD Value (nm)', fontsize=12, fontweight='bold')
-    cbar.ax.tick_params(labelsize=10)
-    
-    plt.tight_layout()
-    return fig
-
-def analyze_enhanced_wafer_data(csv_file_path):
-    """完整的增强wafer数据分析和可视化"""
-    print("=== 增强版 Wafer Map 分析 ===\n")
+def analyze_site_based_wafer_data(csv_file_path):
+    """完整的基于站点的wafer数据分析"""
+    print("=== 基于站点的 Wafer Map 分析 ===\n")
     
     # 加载数据
     x, y, z = load_wafer_data(csv_file_path)
@@ -416,84 +412,75 @@ def analyze_enhanced_wafer_data(csv_file_path):
         print("无法加载数据，请检查文件路径和格式")
         return
     
-    # 显示详细统计
-    print("\n=== 详细数据统计 ===")
+    # 显示统计
+    print("\n=== 数据统计 ===")
     print(f"数据点数量: {len(x)}")
-    print(f"CD统计:")
-    print(f"  平均值: {np.mean(z):.3f} nm")
-    print(f"  中位数: {np.median(z):.3f} nm")
-    print(f"  标准差: {np.std(z):.3f} nm")
-    print(f"  范围: {z.min():.3f} - {z.max():.3f} nm")
-    print(f"  3σ范围: {np.mean(z) - 3*np.std(z):.3f} - {np.mean(z) + 3*np.std(z):.3f} nm")
-    print(f"坐标范围:")
-    print(f"  X: {x.min():.2f} - {x.max():.2f} mm")
-    print(f"  Y: {y.min():.2f} - {y.max():.2f} mm")
+    print(f"CD统计: 平均={np.mean(z):.2f}, 标准差={np.std(z):.2f}, 范围={z.min():.2f}-{z.max():.2f}")
     
-    # 生成增强版可视化
-    print("\n正在生成增强版可视化图表...")
+    # 生成不同风格的可视化
+    print("\n正在生成基于站点的可视化图表...")
     
-    # 增强连续性图
-    fig1 = plot_enhanced_continuous_wafer_map(x, y, z, "System-Quality Continuous Wafer Map")
+    # 1. 主要的基于站点的热力图（带数值标注）
+    fig1 = plot_site_based_wafer_map(x, y, z, 
+                                    title="System-Style Site-Based Wafer Map", 
+                                    show_sites=True, show_circles=False)
     plt.show()
     
-    # 增强离散图
-    fig2 = plot_enhanced_discrete_wafer_map(x, y, z, title="System-Quality Discrete Wafer Map")
+    # 2. 比较不同插值方法
+    fig2 = plot_comparison_interpolation_methods(x, y, z)
     plt.show()
     
-    # 增强对比图
-    fig3 = plot_enhanced_comparison(x, y, z)
+    # 3. 离散图（带原始数据点位置）
+    fig3 = plot_discrete_with_site_values(x, y, z)
     plt.show()
     
     return x, y, z
 
 # 使用示例
 if __name__ == "__main__":
-    # 请将此路径替换为您的CSV文件路径
     csv_file_path = "your_wafer_data.csv"
     
     try:
-        x, y, z = analyze_enhanced_wafer_data(csv_file_path)
+        x, y, z = analyze_site_based_wafer_data(csv_file_path)
     except FileNotFoundError:
         print("请将 'your_wafer_data.csv' 替换为您的实际CSV文件路径")
         
-        # 创建更真实的示例数据
-        print("正在创建高质量示例数据进行演示...")
+        # 创建示例数据
+        print("正在创建示例数据...")
         
         np.random.seed(42)
-        # 模拟真实wafer数据分布
-        n_points = 150
-        theta = np.random.uniform(0, 2*np.pi, n_points)
-        r = np.sqrt(np.random.uniform(0, 1, n_points)) * 75  # 更均匀的径向分布
+        # 模拟规则网格上的测量点
+        x_grid = np.linspace(-75, 75, 12)
+        y_grid = np.linspace(-75, 75, 10)
+        X_grid, Y_grid = np.meshgrid(x_grid, y_grid)
         
-        x_demo = r * np.cos(theta)
-        y_demo = r * np.sin(theta)
+        # 只保留圆形区域内的点
+        mask = X_grid**2 + Y_grid**2 <= 75**2
+        x_demo = X_grid[mask].flatten()
+        y_demo = Y_grid[mask].flatten()
         
-        # 创建更复杂的CD模式
-        z_demo = (420 + 
-                 30 * np.sin(2*theta) +  # 角度变化
-                 20 * (r/75)**2 +        # 径向变化
-                 15 * np.sin(4*theta) +  # 高频角度变化
-                 np.random.normal(0, 8, n_points))  # 噪声
+        # 创建模拟CD数据
+        z_demo = (415 + 
+                 20 * np.sin(2 * np.arctan2(y_demo, x_demo)) +  # 角度变化
+                 10 * np.sqrt(x_demo**2 + y_demo**2) / 75 +     # 径向变化
+                 np.random.normal(0, 5, len(x_demo)))           # 噪声
         
-        print("高质量示例数据演示：")
-        fig1 = plot_enhanced_continuous_wafer_map(x_demo, y_demo, z_demo, 
-                                                 "示例 - System-Quality Continuous Map")
-        plt.show()
-        
-        fig2 = plot_enhanced_discrete_wafer_map(x_demo, y_demo, z_demo, 
-                                               title="示例 - System-Quality Discrete Map")
+        print("示例数据演示（基于站点的方法）：")
+        fig1 = plot_site_based_wafer_map(x_demo, y_demo, z_demo, 
+                                        title="示例 - System-Style Site-Based Map",
+                                        show_sites=True)
         plt.show()
 
 # 快速使用函数
-def quick_enhanced_wafer_plot(csv_file_path, plot_type='comparison'):
-    """快速生成增强版wafer map"""
+def quick_site_based_plot(csv_file_path, plot_type='site_based'):
+    """快速生成基于站点的wafer map"""
     x, y, z = load_wafer_data(csv_file_path)
     if x is None:
         return None
     
-    if plot_type == 'continuous':
-        return plot_enhanced_continuous_wafer_map(x, y, z)
-    elif plot_type == 'discrete':
-        return plot_enhanced_discrete_wafer_map(x, y, z)
+    if plot_type == 'site_based':
+        return plot_site_based_wafer_map(x, y, z)
+    elif plot_type == 'comparison':
+        return plot_comparison_interpolation_methods(x, y, z)
     else:
-        return plot_enhanced_comparison(x, y, z)
+        return plot_discrete_with_site_values(x, y, z)
