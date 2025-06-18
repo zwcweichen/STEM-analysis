@@ -156,7 +156,8 @@ def create_wafer_boundary(xi, yi, x_data, y_data, buffer_ratio=0.05):
     return mask, center_x, center_y, radius
 
 def plot_site_based_wafer_map(x, y, z, title="Site-Based Radial Wafer Map", 
-                             figsize=(14, 12), show_sites=True, show_circles=False):
+                             figsize=(14, 12), show_sites=True, show_circles=False,
+                             vmin=None, vmax=None, site_style='circle'):
     """
     绘制基于站点的径向wafer map（模仿系统效果）
     
@@ -186,8 +187,9 @@ def plot_site_based_wafer_map(x, y, z, title="Site-Based Radial Wafer Map",
     mask, center_x, center_y, radius = create_wafer_boundary(Xi, Yi, x, y)
     Zi[~mask] = np.nan
     
-    # 绘制基础热力图
-    z_min, z_max = z.min(), z.max()
+    # 设置colorbar范围
+    z_min = vmin if vmin is not None else z.min()
+    z_max = vmax if vmax is not None else z.max()
     levels = np.linspace(z_min, z_max, 100)
     
     contour = ax.contourf(Xi, Yi, Zi, levels=levels, cmap=cmap_custom, 
@@ -203,21 +205,37 @@ def plot_site_based_wafer_map(x, y, z, title="Site-Based Radial Wafer Map",
     
     # 显示原始测量点和数值（模仿系统效果）
     if show_sites:
-        # 绘制测量点
-        scatter = ax.scatter(x, y, c=z, s=35, cmap=cmap_custom, 
-                           edgecolors='black', linewidth=1.0, alpha=0.95, zorder=10)
-        
-        # 添加数值标签（重要！这是系统图的关键特征）
-        for i, (x_point, y_point, z_point) in enumerate(zip(x, y, z)):
-            # 根据背景颜色选择文字颜色
-            norm_value = (z_point - z_min) / (z_max - z_min)
-            text_color = 'white' if norm_value < 0.4 or norm_value > 0.8 else 'black'
+        if site_style == 'circle':
+            # 绘制圆形测量点（模仿系统样式）
+            for i, (x_point, y_point, z_point) in enumerate(zip(x, y, z)):
+                # 计算点的颜色
+                norm_value = (z_point - z_min) / (z_max - z_min)
+                point_color = cmap_custom(norm_value)
+                
+                # 绘制圆形点
+                circle_point = plt.Circle((x_point, y_point), radii[i] * 0.15, 
+                                        facecolor=point_color, edgecolor='black', 
+                                        linewidth=1.0, alpha=0.95, zorder=10)
+                ax.add_patch(circle_point)
+                
+                # 添加数值标签（无背景框）
+                text_color = 'white' if norm_value < 0.3 or norm_value > 0.8 else 'black'
+                ax.text(x_point, y_point + radii[i] * 0.8, f'{z_point:.1f}', 
+                       ha='center', va='center', fontsize=8, fontweight='bold',
+                       color=text_color, zorder=15)
+        else:
+            # 原来的scatter plot方式
+            scatter = ax.scatter(x, y, c=z, s=35, cmap=cmap_custom, 
+                               edgecolors='black', linewidth=1.0, alpha=0.95, zorder=10)
             
-            ax.text(x_point, y_point + radii[i] * 0.7, f'{z_point:.1f}', 
-                   ha='center', va='center', fontsize=7, fontweight='bold',
-                   color=text_color, zorder=15,
-                   bbox=dict(boxstyle='round,pad=0.2', facecolor='white', 
-                           alpha=0.7, edgecolor='none'))
+            # 添加数值标签（无背景框）
+            for i, (x_point, y_point, z_point) in enumerate(zip(x, y, z)):
+                norm_value = (z_point - z_min) / (z_max - z_min)
+                text_color = 'white' if norm_value < 0.3 or norm_value > 0.8 else 'black'
+                
+                ax.text(x_point, y_point + radii[i] * 0.7, f'{z_point:.1f}', 
+                       ha='center', va='center', fontsize=7, fontweight='bold',
+                       color=text_color, zorder=15)
     
     # 添加wafer边界圆
     circle_boundary = plt.Circle((center_x, center_y), radius, fill=False, 
@@ -236,8 +254,11 @@ def plot_site_based_wafer_map(x, y, z, title="Site-Based Radial Wafer Map",
     ax.grid(True, alpha=0.2, linestyle='-', linewidth=0.5)
     ax.tick_params(labelsize=10)
     
-    # 添加颜色条
-    cbar = plt.colorbar(contour, ax=ax, shrink=0.8, pad=0.02)
+    # 添加颜色条（使用自定义范围）
+    norm = Normalize(vmin=z_min, vmax=z_max)
+    sm = plt.cm.ScalarMappable(cmap=cmap_custom, norm=norm)
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax, shrink=0.8, pad=0.02)
     cbar.set_label('CD Value (nm)', fontsize=12, fontweight='bold')
     cbar.ax.tick_params(labelsize=10)
     
@@ -402,7 +423,7 @@ def plot_discrete_with_site_values(x, y, z, grid_size=None, title="Discrete Map 
     plt.tight_layout()
     return fig
 
-def analyze_site_based_wafer_data(csv_file_path):
+def analyze_site_based_wafer_data(csv_file_path, vmin=None, vmax=None):
     """完整的基于站点的wafer数据分析"""
     print("=== 基于站点的 Wafer Map 分析 ===\n")
     
@@ -417,21 +438,32 @@ def analyze_site_based_wafer_data(csv_file_path):
     print(f"数据点数量: {len(x)}")
     print(f"CD统计: 平均={np.mean(z):.2f}, 标准差={np.std(z):.2f}, 范围={z.min():.2f}-{z.max():.2f}")
     
+    # 设置colorbar范围
+    if vmin is None:
+        vmin = z.min()
+    if vmax is None:
+        vmax = z.max()
+    print(f"Colorbar范围: {vmin:.2f} - {vmax:.2f}")
+    
     # 生成不同风格的可视化
     print("\n正在生成基于站点的可视化图表...")
     
-    # 1. 主要的基于站点的热力图（带数值标注）
+    # 1. 主要的基于站点的热力图（圆形点，无背景框）
     fig1 = plot_site_based_wafer_map(x, y, z, 
-                                    title="System-Style Site-Based Wafer Map", 
-                                    show_sites=True, show_circles=False)
+                                    title="System-Style Site-Based Wafer Map (Circle Style)", 
+                                    show_sites=True, show_circles=False,
+                                    vmin=vmin, vmax=vmax, site_style='circle')
     plt.show()
     
-    # 2. 比较不同插值方法
-    fig2 = plot_comparison_interpolation_methods(x, y, z)
+    # 2. 传统scatter风格（可选）
+    fig2 = plot_site_based_wafer_map(x, y, z, 
+                                    title="System-Style Site-Based Wafer Map (Scatter Style)", 
+                                    show_sites=True, show_circles=False,
+                                    vmin=vmin, vmax=vmax, site_style='scatter')
     plt.show()
     
-    # 3. 离散图（带原始数据点位置）
-    fig3 = plot_discrete_with_site_values(x, y, z)
+    # 3. 比较不同插值方法
+    fig3 = plot_comparison_interpolation_methods(x, y, z)
     plt.show()
     
     return x, y, z
@@ -466,20 +498,29 @@ if __name__ == "__main__":
                  np.random.normal(0, 5, len(x_demo)))           # 噪声
         
         print("示例数据演示（基于站点的方法）：")
+        
+        # 圆形点风格（推荐，更接近系统样式）
         fig1 = plot_site_based_wafer_map(x_demo, y_demo, z_demo, 
-                                        title="示例 - System-Style Site-Based Map",
-                                        show_sites=True)
+                                        title="示例 - System-Style (Circle Points)",
+                                        show_sites=True, site_style='circle',
+                                        vmin=400, vmax=430)  # 自定义colorbar范围
+        plt.show()
+        
+        # Scatter风格
+        fig2 = plot_site_based_wafer_map(x_demo, y_demo, z_demo, 
+                                        title="示例 - System-Style (Scatter Points)",
+                                        show_sites=True, site_style='scatter')
         plt.show()
 
 # 快速使用函数
-def quick_site_based_plot(csv_file_path, plot_type='site_based'):
+def quick_site_based_plot(csv_file_path, plot_type='site_based', vmin=None, vmax=None, site_style='circle'):
     """快速生成基于站点的wafer map"""
     x, y, z = load_wafer_data(csv_file_path)
     if x is None:
         return None
     
     if plot_type == 'site_based':
-        return plot_site_based_wafer_map(x, y, z)
+        return plot_site_based_wafer_map(x, y, z, vmin=vmin, vmax=vmax, site_style=site_style)
     elif plot_type == 'comparison':
         return plot_comparison_interpolation_methods(x, y, z)
     else:
