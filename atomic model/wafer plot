@@ -1,527 +1,347 @@
+import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import pandas as pd
-from matplotlib.colors import LinearSegmentedColormap, Normalize
-from scipy.spatial.distance import cdist
-import matplotlib.patches as patches
+from matplotlib.colors import LinearSegmentedColormap
+import os
 
-# 创建更精确的自定义colormap（更接近您系统的颜色）
-colors = ['#2E0854', '#1B4F9C', '#0080FF', '#00BFFF', '#40E0D0', '#7FFFD4', 
-          '#ADFF2F', '#FFFF00', '#FFD700', '#FFA500', '#FF6347', '#FF0000', '#8B0000']
-n_bins = 512
-cmap_custom = LinearSegmentedColormap.from_list('wafer_enhanced', colors, N=n_bins)
-
-def load_wafer_data(csv_file_path):
-    """从CSV文件加载wafer数据"""
+def read_excel_sheets(excel_file_path, sheet_aei='AEI', sheet_adi='ADI'):
+    """
+    读取Excel文件的两个分页
+    
+    Parameters:
+    excel_file_path: Excel文件路径
+    sheet_aei: AEI分页名称
+    sheet_adi: ADI分页名称
+    
+    Returns:
+    df_aei, df_adi: 两个DataFrame
+    """
     try:
-        df = pd.read_csv(csv_file_path)
+        # 读取两个分页
+        df_aei = pd.read_excel(excel_file_path, sheet_name=sheet_aei)
+        df_adi = pd.read_excel(excel_file_path, sheet_name=sheet_adi)
         
-        required_columns = ['Location x', 'Location y', 'CD']
-        missing_columns = [col for col in required_columns if col not in df.columns]
+        print(f"成功读取Excel文件: {excel_file_path}")
+        print(f"AEI分页数据: {len(df_aei)} 行")
+        print(f"ADI分页数据: {len(df_adi)} 行")
         
-        if missing_columns:
-            print(f"警告：缺少以下列: {missing_columns}")
-            print(f"可用的列: {list(df.columns)}")
-            return None, None, None
+        # 显示列名
+        print(f"\nAEI分页列名: {list(df_aei.columns)}")
+        print(f"ADI分页列名: {list(df_adi.columns)}")
         
-        x = df['Location x'].values
-        y = df['Location y'].values
-        z = df['CD'].values
-        
-        # 移除NaN值
-        valid_mask = ~(np.isnan(x) | np.isnan(y) | np.isnan(z))
-        x = x[valid_mask]
-        y = y[valid_mask]
-        z = z[valid_mask]
-        
-        print(f"成功加载数据：{len(x)} 个有效数据点")
-        print(f"X范围: {x.min():.2f} 到 {x.max():.2f}")
-        print(f"Y范围: {y.min():.2f} 到 {y.max():.2f}")
-        print(f"CD范围: {z.min():.2f} 到 {z.max():.2f}")
-        
-        return x, y, z
+        return df_aei, df_adi
         
     except Exception as e:
-        print(f"读取CSV文件时出错: {e}")
-        return None, None, None
+        print(f"读取Excel文件时出错: {e}")
+        return None, None
 
-def calculate_adaptive_radius(x, y, method='nearest_neighbor', factor=0.8):
+def calculate_cd_difference(df_aei, df_adi, coordinate_col='Coordinate', cd_col='CD', 
+                          location_x_col='Location x', location_y_col='Location y'):
     """
-    自适应计算每个点的影响半径
+    根据相同的Coordinate计算CD差值 (AEI - ADI)
     
     Parameters:
-    x, y: 坐标数组
-    method: 'nearest_neighbor', 'density_based', 'uniform'
-    factor: 调整因子
+    df_aei, df_adi: 两个DataFrame
+    coordinate_col: 坐标列名
+    cd_col: CD测量值列名
+    location_x_col, location_y_col: 位置坐标列名
+    
+    Returns:
+    df_result: 包含差值结果的DataFrame
     """
-    if method == 'nearest_neighbor':
-        # 基于最近邻距离
-        points = np.column_stack([x, y])
-        distances = cdist(points, points)
-        np.fill_diagonal(distances, np.inf)  # 排除自己
-        nearest_distances = np.min(distances, axis=1)
-        # 使用最近邻距离的一定比例作为影响半径
-        radii = nearest_distances * factor
-        return radii
-    
-    elif method == 'density_based':
-        # 基于局部密度
-        points = np.column_stack([x, y])
-        distances = cdist(points, points)
-        # 计算每个点周围的平均距离
-        avg_distances = np.mean(distances, axis=1)
-        radii = avg_distances * factor
-        return radii
-    
-    else:  # uniform
-        # 统一半径
-        x_range = x.max() - x.min()
-        y_range = y.max() - y.min()
-        uniform_radius = min(x_range, y_range) / (np.sqrt(len(x)) * 2) * factor
-        return np.full(len(x), uniform_radius)
-
-def site_based_radial_interpolation(x_data, y_data, z_data, xi, yi, 
-                                  radius_method='nearest_neighbor', 
-                                  influence_function='gaussian',
-                                  radius_factor=1.2):
-    """
-    基于站点的径向插值（模仿系统的圆形叠加效果）
-    
-    Parameters:
-    x_data, y_data, z_data: 原始数据点
-    xi, yi: 插值网格
-    radius_method: 半径计算方法
-    influence_function: 影响函数类型 ('gaussian', 'linear', 'exponential')
-    radius_factor: 半径调整因子
-    """
-    print(f"正在进行基于站点的径向插值...")
-    
-    # 计算每个数据点的影响半径
-    radii = calculate_adaptive_radius(x_data, y_data, method=radius_method, factor=radius_factor)
-    
-    # 初始化插值结果
-    zi = np.zeros_like(xi)
-    weights_sum = np.zeros_like(xi)
-    
-    # 对每个数据点计算其对网格的影响
-    for i, (x_point, y_point, z_point, radius) in enumerate(zip(x_data, y_data, z_data, radii)):
-        # 计算距离
-        distances = np.sqrt((xi - x_point)**2 + (yi - y_point)**2)
+    try:
+        # 确保必要的列存在
+        required_cols = [coordinate_col, cd_col, location_x_col, location_y_col]
         
-        # 计算权重（根据影响函数）
-        if influence_function == 'gaussian':
-            # 高斯函数
-            sigma = radius / 3.0  # 3σ原则
-            weights = np.exp(-(distances**2) / (2 * sigma**2))
-        elif influence_function == 'linear':
-            # 线性衰减
-            weights = np.maximum(0, 1 - distances / radius)
-        elif influence_function == 'exponential':
-            # 指数衰减
-            weights = np.exp(-distances / radius)
-        else:
-            # 默认高斯
-            sigma = radius / 3.0
-            weights = np.exp(-(distances**2) / (2 * sigma**2))
+        for col in required_cols:
+            if col not in df_aei.columns:
+                print(f"AEI分页缺少列: {col}")
+                return None
+            if col not in df_adi.columns:
+                print(f"ADI分页缺少列: {col}")
+                return None
         
-        # 只在影响范围内计算
-        mask = distances <= radius * 3  # 3倍半径内有影响
-        weights[~mask] = 0
+        # 清理数据，移除NaN值
+        df_aei_clean = df_aei.dropna(subset=required_cols).copy()
+        df_adi_clean = df_adi.dropna(subset=required_cols).copy()
         
-        # 累加加权值
-        zi += weights * z_point
-        weights_sum += weights
-    
-    # 归一化
-    mask_valid = weights_sum > 1e-10
-    zi[mask_valid] = zi[mask_valid] / weights_sum[mask_valid]
-    zi[~mask_valid] = np.nan
-    
-    return zi, radii
+        # 将Coordinate转换为字符串以确保匹配
+        df_aei_clean[coordinate_col] = df_aei_clean[coordinate_col].astype(str)
+        df_adi_clean[coordinate_col] = df_adi_clean[coordinate_col].astype(str)
+        
+        # 根据Coordinate进行合并
+        merged_df = pd.merge(df_aei_clean, df_adi_clean, 
+                           on=coordinate_col, 
+                           suffixes=('_AEI', '_ADI'))
+        
+        # 计算CD差值 (AEI - ADI)
+        merged_df['CD_Difference'] = merged_df[f'{cd_col}_AEI'] - merged_df[f'{cd_col}_ADI']
+        
+        # 创建结果DataFrame
+        result_df = pd.DataFrame({
+            'Coordinate': merged_df[coordinate_col],
+            'Location_X': merged_df[f'{location_x_col}_AEI'],  # 使用AEI的位置数据
+            'Location_Y': merged_df[f'{location_y_col}_AEI'],
+            'CD_AEI': merged_df[f'{cd_col}_AEI'],
+            'CD_ADI': merged_df[f'{cd_col}_ADI'],
+            'CD_Difference': merged_df['CD_Difference'],
+            'CD_Difference_Abs': np.abs(merged_df['CD_Difference']),
+            'CD_Difference_Percent': (merged_df['CD_Difference'] / merged_df[f'{cd_col}_ADI']) * 100
+        })
+        
+        print(f"\n=== CD差值计算结果 ===")
+        print(f"匹配的数据点: {len(result_df)}")
+        print(f"AEI原始数据点: {len(df_aei_clean)}")
+        print(f"ADI原始数据点: {len(df_adi_clean)}")
+        print(f"匹配率: {len(result_df)/min(len(df_aei_clean), len(df_adi_clean))*100:.1f}%")
+        
+        print(f"\n=== CD差值统计 ===")
+        print(f"平均差值: {result_df['CD_Difference'].mean():.3f}")
+        print(f"标准差: {result_df['CD_Difference'].std():.3f}")
+        print(f"最大差值: {result_df['CD_Difference'].max():.3f}")
+        print(f"最小差值: {result_df['CD_Difference'].min():.3f}")
+        print(f"绝对平均差值: {result_df['CD_Difference_Abs'].mean():.3f}")
+        
+        return result_df
+        
+    except Exception as e:
+        print(f"计算CD差值时出错: {e}")
+        return None
 
-def create_wafer_boundary(xi, yi, x_data, y_data, buffer_ratio=0.05):
-    """创建wafer边界"""
-    # 计算数据的实际边界
-    center_x = (x_data.max() + x_data.min()) / 2
-    center_y = (y_data.max() + y_data.min()) / 2
+def plot_cd_difference_map(result_df, title="CD Difference Map (AEI - ADI)", figsize=(14, 10)):
+    """
+    绘制CD差值的wafer map
+    """
+    if result_df is None or len(result_df) == 0:
+        print("没有数据可以绘制")
+        return None
     
-    # 使用实际数据点来确定wafer边界
-    distances = np.sqrt((x_data - center_x)**2 + (y_data - center_y)**2)
-    radius = np.percentile(distances, 98)  # 使用98%分位数
+    # 创建颜色映射（差值用红蓝色系）
+    colors_diff = ['#000080', '#0080FF', '#FFFFFF', '#FF8000', '#FF0000']
+    cmap_diff = LinearSegmentedColormap.from_list('cd_difference', colors_diff, N=256)
     
-    # 创建circular mask
-    dist_from_center = np.sqrt((xi - center_x)**2 + (yi - center_y)**2)
-    mask = dist_from_center <= radius
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
     
-    return mask, center_x, center_y, radius
+    # 提取数据
+    x = result_df['Location_X'].values
+    y = result_df['Location_Y'].values
+    diff = result_df['CD_Difference'].values
+    
+    # 左图：CD差值分布
+    scatter1 = ax1.scatter(x, y, c=diff, s=60, cmap=cmap_diff, 
+                          edgecolors='black', linewidth=0.5, alpha=0.8)
+    
+    # 添加数值标签
+    for i, (xi, yi, di) in enumerate(zip(x, y, diff)):
+        color = 'white' if abs(di) > np.std(diff) else 'black'
+        ax1.text(xi, yi-8, f'{di:.1f}', ha='center', va='center', 
+                fontsize=7, fontweight='bold', color=color)
+    
+    ax1.set_title('CD Difference (AEI - ADI)', fontsize=12, fontweight='bold')
+    ax1.set_xlabel('Location X (mm)', fontsize=10)
+    ax1.set_ylabel('Location Y (mm)', fontsize=10)
+    ax1.grid(True, alpha=0.3)
+    ax1.set_aspect('equal')
+    
+    # 添加colorbar
+    cbar1 = plt.colorbar(scatter1, ax=ax1, shrink=0.8)
+    cbar1.set_label('CD Difference (nm)', fontsize=10)
+    
+    # 右图：绝对差值分布
+    abs_diff = np.abs(diff)
+    scatter2 = ax2.scatter(x, y, c=abs_diff, s=60, cmap='Reds', 
+                          edgecolors='black', linewidth=0.5, alpha=0.8)
+    
+    # 添加数值标签
+    for i, (xi, yi, adi) in enumerate(zip(x, y, abs_diff)):
+        color = 'white' if adi > np.mean(abs_diff) else 'black'
+        ax2.text(xi, yi-8, f'{adi:.1f}', ha='center', va='center', 
+                fontsize=7, fontweight='bold', color=color)
+    
+    ax2.set_title('Absolute CD Difference |AEI - ADI|', fontsize=12, fontweight='bold')
+    ax2.set_xlabel('Location X (mm)', fontsize=10)
+    ax2.set_ylabel('Location Y (mm)', fontsize=10)
+    ax2.grid(True, alpha=0.3)
+    ax2.set_aspect('equal')
+    
+    # 添加colorbar
+    cbar2 = plt.colorbar(scatter2, ax=ax2, shrink=0.8)
+    cbar2.set_label('Absolute CD Difference (nm)', fontsize=10)
+    
+    plt.tight_layout()
+    return fig
 
-def plot_site_based_wafer_map(x, y, z, title="Site-Based Radial Wafer Map", 
-                             figsize=(14, 12), show_sites=True, show_circles=False,
-                             vmin=None, vmax=None, site_style='circle'):
+def plot_cd_comparison_scatter(result_df, figsize=(12, 5)):
     """
-    绘制基于站点的径向wafer map（模仿系统效果）
-    
-    Parameters:
-    show_sites: 是否显示原始测量点和数值
-    show_circles: 是否显示影响圆圈（用于调试）
+    绘制AEI vs ADI的散点图比较
     """
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    if result_df is None or len(result_df) == 0:
+        print("没有数据可以绘制")
+        return None
     
-    # 创建高分辨率网格
-    grid_density = 500
-    margin_factor = 0.1
-    x_margin = (x.max() - x.min()) * margin_factor
-    y_margin = (y.max() - y.min()) * margin_factor
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
     
-    xi = np.linspace(x.min() - x_margin, x.max() + x_margin, grid_density)
-    yi = np.linspace(y.min() - y_margin, y.max() + y_margin, grid_density)
-    Xi, Yi = np.meshgrid(xi, yi)
+    aei_vals = result_df['CD_AEI'].values
+    adi_vals = result_df['CD_ADI'].values
+    diff_vals = result_df['CD_Difference'].values
     
-    # 使用基于站点的径向插值
-    Zi, radii = site_based_radial_interpolation(x, y, z, Xi, Yi, 
-                                               radius_method='nearest_neighbor',
-                                               influence_function='gaussian',
-                                               radius_factor=1.0)
+    # 左图：AEI vs ADI散点图
+    ax1.scatter(adi_vals, aei_vals, c=diff_vals, s=50, alpha=0.7, 
+               edgecolors='black', linewidth=0.5, cmap='RdBu_r')
     
-    # 创建wafer边界
-    mask, center_x, center_y, radius = create_wafer_boundary(Xi, Yi, x, y)
-    Zi[~mask] = np.nan
+    # 添加1:1线
+    min_val = min(np.min(aei_vals), np.min(adi_vals))
+    max_val = max(np.max(aei_vals), np.max(adi_vals))
+    ax1.plot([min_val, max_val], [min_val, max_val], 'k--', alpha=0.5, linewidth=2)
     
-    # 设置colorbar范围
-    z_min = vmin if vmin is not None else z.min()
-    z_max = vmax if vmax is not None else z.max()
-    levels = np.linspace(z_min, z_max, 100)
+    ax1.set_xlabel('ADI CD (nm)', fontsize=11)
+    ax1.set_ylabel('AEI CD (nm)', fontsize=11)
+    ax1.set_title('AEI vs ADI Correlation', fontsize=12, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
     
-    contour = ax.contourf(Xi, Yi, Zi, levels=levels, cmap=cmap_custom, 
-                         extend='both', alpha=0.85)
+    # 计算相关系数
+    correlation = np.corrcoef(aei_vals, adi_vals)[0, 1]
+    ax1.text(0.05, 0.95, f'相关系数: {correlation:.3f}', 
+            transform=ax1.transAxes, fontsize=10, 
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     
-    # 可选：显示影响圆圈（调试用）
-    if show_circles:
-        for i, (x_point, y_point, radius_point) in enumerate(zip(x, y, radii)):
-            if i % 3 == 0:  # 只显示部分圆圈避免太乱
-                circle = plt.Circle((x_point, y_point), radius_point, 
-                                  fill=False, color='white', alpha=0.3, linewidth=0.5)
-                ax.add_patch(circle)
+    # 右图：差值分布直方图
+    ax2.hist(diff_vals, bins=20, alpha=0.7, color='skyblue', edgecolor='black')
+    ax2.axvline(np.mean(diff_vals), color='red', linestyle='--', linewidth=2, 
+               label=f'平均值: {np.mean(diff_vals):.2f}')
+    ax2.axvline(0, color='black', linestyle='-', linewidth=1, alpha=0.5)
     
-    # 显示原始测量点和数值（模仿系统效果）
-    if show_sites:
-        if site_style == 'circle':
-            # 绘制圆形测量点（模仿系统样式）
-            for i, (x_point, y_point, z_point) in enumerate(zip(x, y, z)):
-                # 计算点的颜色
-                norm_value = (z_point - z_min) / (z_max - z_min)
-                point_color = cmap_custom(norm_value)
-                
-                # 绘制圆形点
-                circle_point = plt.Circle((x_point, y_point), radii[i] * 0.15, 
-                                        facecolor=point_color, edgecolor='black', 
-                                        linewidth=1.0, alpha=0.95, zorder=10)
-                ax.add_patch(circle_point)
-                
-                # 添加数值标签（无背景框）
-                text_color = 'white' if norm_value < 0.3 or norm_value > 0.8 else 'black'
-                ax.text(x_point, y_point + radii[i] * 0.8, f'{z_point:.1f}', 
-                       ha='center', va='center', fontsize=8, fontweight='bold',
-                       color=text_color, zorder=15)
-        else:
-            # 原来的scatter plot方式
-            scatter = ax.scatter(x, y, c=z, s=35, cmap=cmap_custom, 
-                               edgecolors='black', linewidth=1.0, alpha=0.95, zorder=10)
+    ax2.set_xlabel('CD Difference (AEI - ADI) [nm]', fontsize=11)
+    ax2.set_ylabel('频次', fontsize=11)
+    ax2.set_title('CD Difference Distribution', fontsize=12, fontweight='bold')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    return fig
+
+def save_results_to_excel(result_df, output_file_path):
+    """
+    将结果保存到新的Excel文件
+    """
+    try:
+        with pd.ExcelWriter(output_file_path, engine='openpyxl') as writer:
+            # 保存完整结果
+            result_df.to_excel(writer, sheet_name='CD_Difference_Results', index=False)
             
-            # 添加数值标签（无背景框）
-            for i, (x_point, y_point, z_point) in enumerate(zip(x, y, z)):
-                norm_value = (z_point - z_min) / (z_max - z_min)
-                text_color = 'white' if norm_value < 0.3 or norm_value > 0.8 else 'black'
-                
-                ax.text(x_point, y_point + radii[i] * 0.7, f'{z_point:.1f}', 
-                       ha='center', va='center', fontsize=7, fontweight='bold',
-                       color=text_color, zorder=15)
-    
-    # 添加wafer边界圆
-    circle_boundary = plt.Circle((center_x, center_y), radius, fill=False, 
-                               color='black', linewidth=3, alpha=0.8)
-    ax.add_patch(circle_boundary)
-    
-    # 设置坐标轴
-    ax.set_xlim(x.min() - x_margin * 0.5, x.max() + x_margin * 0.5)
-    ax.set_ylim(y.min() - y_margin * 0.5, y.max() + y_margin * 0.5)
-    ax.set_aspect('equal')
-    
-    # 美化
-    ax.set_title(title, fontsize=16, fontweight='bold', pad=20)
-    ax.set_xlabel('Location X (mm)', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Location Y (mm)', fontsize=12, fontweight='bold')
-    ax.grid(True, alpha=0.2, linestyle='-', linewidth=0.5)
-    ax.tick_params(labelsize=10)
-    
-    # 添加颜色条（使用自定义范围）
-    norm = Normalize(vmin=z_min, vmax=z_max)
-    sm = plt.cm.ScalarMappable(cmap=cmap_custom, norm=norm)
-    sm.set_array([])
-    cbar = plt.colorbar(sm, ax=ax, shrink=0.8, pad=0.02)
-    cbar.set_label('CD Value (nm)', fontsize=12, fontweight='bold')
-    cbar.ax.tick_params(labelsize=10)
-    
-    # 添加统计信息
-    stats_text = (f'Data Points: {len(x)}\n'
-                 f'Mean CD: {np.mean(z):.2f} nm\n'
-                 f'Std Dev: {np.std(z):.2f} nm\n'
-                 f'Range: {z.min():.2f} - {z.max():.2f} nm\n'
-                 f'Method: Site-Based Radial')
-    
-    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=9,
-            verticalalignment='top', bbox=dict(boxstyle='round,pad=0.5', 
-            facecolor='white', alpha=0.9, edgecolor='gray'))
-    
-    plt.tight_layout()
-    return fig
+            # 创建统计摘要
+            summary_data = {
+                '统计项目': ['数据点数量', '平均差值', '标准差', '最大差值', '最小差值', 
+                           '绝对平均差值', '3σ上限', '3σ下限'],
+                '数值': [len(result_df),
+                        result_df['CD_Difference'].mean(),
+                        result_df['CD_Difference'].std(),
+                        result_df['CD_Difference'].max(),
+                        result_df['CD_Difference'].min(),
+                        result_df['CD_Difference_Abs'].mean(),
+                        result_df['CD_Difference'].mean() + 3*result_df['CD_Difference'].std(),
+                        result_df['CD_Difference'].mean() - 3*result_df['CD_Difference'].std()]
+            }
+            summary_df = pd.DataFrame(summary_data)
+            summary_df.to_excel(writer, sheet_name='Statistics_Summary', index=False)
+            
+        print(f"结果已保存到: {output_file_path}")
+        
+    except Exception as e:
+        print(f"保存Excel文件时出错: {e}")
 
-def plot_comparison_interpolation_methods(x, y, z, figsize=(20, 12)):
-    """比较不同插值方法的效果"""
-    fig, axes = plt.subplots(2, 2, figsize=figsize)
+def analyze_excel_cd_difference(excel_file_path, output_dir=None):
+    """
+    完整的Excel CD差值分析流程
     
-    # 创建网格
-    grid_density = 300
-    margin_factor = 0.05
-    x_margin = (x.max() - x.min()) * margin_factor
-    y_margin = (y.max() - y.min()) * margin_factor
+    Parameters:
+    excel_file_path: 输入Excel文件路径
+    output_dir: 输出目录（可选）
+    """
+    print("=== Excel CD差值分析 ===\n")
     
-    xi = np.linspace(x.min() - x_margin, x.max() + x_margin, grid_density)
-    yi = np.linspace(y.min() - y_margin, y.max() + y_margin, grid_density)
-    Xi, Yi = np.meshgrid(xi, yi)
+    # 读取Excel数据
+    df_aei, df_adi = read_excel_sheets(excel_file_path)
+    if df_aei is None or df_adi is None:
+        return None
     
-    # 方法列表
-    methods = [
-        ('nearest_neighbor', 'gaussian', '基于最近邻的高斯核'),
-        ('density_based', 'gaussian', '基于密度的高斯核'),
-        ('uniform', 'gaussian', '统一半径高斯核'),
-        ('nearest_neighbor', 'linear', '基于最近邻的线性衰减')
-    ]
+    # 计算CD差值
+    result_df = calculate_cd_difference(df_aei, df_adi)
+    if result_df is None:
+        return None
     
-    z_min, z_max = z.min(), z.max()
-    levels = np.linspace(z_min, z_max, 50)
+    # 显示结果预览
+    print(f"\n=== 结果预览 ===")
+    print(result_df.head(10))
     
-    for idx, (radius_method, influence_func, method_name) in enumerate(methods):
-        ax = axes[idx // 2, idx % 2]
-        
-        # 插值
-        Zi, radii = site_based_radial_interpolation(x, y, z, Xi, Yi,
-                                                   radius_method=radius_method,
-                                                   influence_function=influence_func)
-        
-        # 应用wafer边界
-        mask, center_x, center_y, radius = create_wafer_boundary(Xi, Yi, x, y)
-        Zi[~mask] = np.nan
-        
-        # 绘制
-        contour = ax.contourf(Xi, Yi, Zi, levels=levels, cmap=cmap_custom, extend='both')
-        ax.scatter(x, y, c=z, s=20, cmap=cmap_custom, edgecolors='white', 
-                  linewidth=0.5, alpha=0.9, zorder=5)
-        
-        # 添加边界
-        circle = plt.Circle((center_x, center_y), radius, fill=False, 
-                          color='black', linewidth=2)
-        ax.add_patch(circle)
-        
-        ax.set_aspect('equal')
-        ax.set_title(method_name, fontsize=12, fontweight='bold')
-        ax.grid(True, alpha=0.2)
-        
-        # 只在最后一个子图添加颜色条
-        if idx == 3:
-            cbar = plt.colorbar(contour, ax=ax, shrink=0.8)
-            cbar.set_label('CD Value (nm)', fontsize=10)
+    # 生成可视化
+    print(f"\n正在生成可视化图表...")
     
-    plt.tight_layout()
-    return fig
-
-def plot_discrete_with_site_values(x, y, z, grid_size=None, title="Discrete Map with Site Values", figsize=(12, 10)):
-    """绘制带站点数值的离散图"""
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    # CD差值wafer map
+    fig1 = plot_cd_difference_map(result_df)
+    if fig1:
+        plt.show()
     
-    if grid_size is None:
-        grid_size = min(max(int(np.sqrt(len(x) * 0.8)), 10), 20)
+    # 对比散点图
+    fig2 = plot_cd_comparison_scatter(result_df)
+    if fig2:
+        plt.show()
     
-    # 创建网格
-    x_bins = np.linspace(x.min(), x.max(), grid_size + 1)
-    y_bins = np.linspace(y.min(), y.max(), grid_size + 1)
+    # 保存结果到Excel
+    if output_dir is None:
+        output_dir = os.path.dirname(excel_file_path)
     
-    # 分配数据到网格
-    grid_data = np.full((grid_size, grid_size), np.nan)
-    grid_counts = np.zeros((grid_size, grid_size))
+    output_file = os.path.join(output_dir, "CD_Difference_Analysis_Results.xlsx")
+    save_results_to_excel(result_df, output_file)
     
-    for i in range(len(x)):
-        x_idx = np.digitize(x[i], x_bins) - 1
-        y_idx = np.digitize(y[i], y_bins) - 1
-        
-        if 0 <= x_idx < grid_size and 0 <= y_idx < grid_size:
-            if grid_counts[y_idx, x_idx] == 0:
-                grid_data[y_idx, x_idx] = z[i]
-                grid_counts[y_idx, x_idx] = 1
-            else:
-                old_mean = grid_data[y_idx, x_idx]
-                grid_counts[y_idx, x_idx] += 1
-                grid_data[y_idx, x_idx] = old_mean + (z[i] - old_mean) / grid_counts[y_idx, x_idx]
-    
-    # 创建wafer形状
-    center_x = grid_size / 2
-    center_y = grid_size / 2
-    radius = grid_size / 2 * 0.85
-    
-    # 绘制网格
-    for i in range(grid_size):
-        for j in range(grid_size):
-            dist_to_center = np.sqrt((j - center_x)**2 + (i - center_y)**2)
-            if dist_to_center <= radius and not np.isnan(grid_data[i, j]):
-                # 计算颜色
-                norm_value = (grid_data[i, j] - z.min()) / (z.max() - z.min())
-                color = cmap_custom(norm_value)
-                
-                # 绘制圆角矩形
-                rect = patches.FancyBboxPatch((j-0.45, grid_size-1-i-0.45), 0.9, 0.9,
-                                            boxstyle="round,pad=0.02",
-                                            linewidth=1.2, edgecolor='white', 
-                                            facecolor=color, alpha=0.9)
-                ax.add_patch(rect)
-                
-                # 添加数值标签
-                font_size = max(6, min(10, 120 // grid_size))
-                text_color = 'white' if norm_value < 0.4 or norm_value > 0.8 else 'black'
-                
-                ax.text(j, grid_size-1-i, f'{grid_data[i, j]:.1f}', 
-                       ha='center', va='center', fontsize=font_size, 
-                       fontweight='bold', color=text_color)
-    
-    # 绘制原始数据点位置（小圆点）
-    for i in range(len(x)):
-        x_idx = (x[i] - x.min()) / (x.max() - x.min()) * (grid_size - 1)
-        y_idx = (y[i] - y.min()) / (y.max() - y.min()) * (grid_size - 1)
-        y_plot = grid_size - 1 - y_idx  # 翻转Y轴
-        
-        ax.plot(x_idx, y_plot, 'ko', markersize=3, alpha=0.7)
-    
-    # 设置坐标轴
-    ax.set_xlim(-0.7, grid_size - 0.3)
-    ax.set_ylim(-0.7, grid_size - 0.3)
-    ax.set_aspect('equal')
-    
-    # 添加网格线
-    for i in range(grid_size + 1):
-        ax.axhline(i - 0.5, color='gray', linewidth=0.3, alpha=0.4)
-        ax.axvline(i - 0.5, color='gray', linewidth=0.3, alpha=0.4)
-    
-    ax.set_title(title, fontsize=14, fontweight='bold')
-    ax.set_xlabel('X Grid Index', fontsize=11)
-    ax.set_ylabel('Y Grid Index', fontsize=11)
-    
-    # 添加颜色条
-    sm = plt.cm.ScalarMappable(cmap=cmap_custom, norm=Normalize(vmin=z.min(), vmax=z.max()))
-    sm.set_array([])
-    cbar = plt.colorbar(sm, ax=ax, shrink=0.8)
-    cbar.set_label('CD Value (nm)', fontsize=11)
-    
-    plt.tight_layout()
-    return fig
-
-def analyze_site_based_wafer_data(csv_file_path, vmin=None, vmax=None):
-    """完整的基于站点的wafer数据分析"""
-    print("=== 基于站点的 Wafer Map 分析 ===\n")
-    
-    # 加载数据
-    x, y, z = load_wafer_data(csv_file_path)
-    if x is None:
-        print("无法加载数据，请检查文件路径和格式")
-        return
-    
-    # 显示统计
-    print("\n=== 数据统计 ===")
-    print(f"数据点数量: {len(x)}")
-    print(f"CD统计: 平均={np.mean(z):.2f}, 标准差={np.std(z):.2f}, 范围={z.min():.2f}-{z.max():.2f}")
-    
-    # 设置colorbar范围
-    if vmin is None:
-        vmin = z.min()
-    if vmax is None:
-        vmax = z.max()
-    print(f"Colorbar范围: {vmin:.2f} - {vmax:.2f}")
-    
-    # 生成不同风格的可视化
-    print("\n正在生成基于站点的可视化图表...")
-    
-    # 1. 主要的基于站点的热力图（圆形点，无背景框）
-    fig1 = plot_site_based_wafer_map(x, y, z, 
-                                    title="System-Style Site-Based Wafer Map (Circle Style)", 
-                                    show_sites=True, show_circles=False,
-                                    vmin=vmin, vmax=vmax, site_style='circle')
-    plt.show()
-    
-    # 2. 传统scatter风格（可选）
-    fig2 = plot_site_based_wafer_map(x, y, z, 
-                                    title="System-Style Site-Based Wafer Map (Scatter Style)", 
-                                    show_sites=True, show_circles=False,
-                                    vmin=vmin, vmax=vmax, site_style='scatter')
-    plt.show()
-    
-    # 3. 比较不同插值方法
-    fig3 = plot_comparison_interpolation_methods(x, y, z)
-    plt.show()
-    
-    return x, y, z
+    return result_df
 
 # 使用示例
 if __name__ == "__main__":
-    csv_file_path = "your_wafer_data.csv"
+    # 请将此路径替换为您的Excel文件路径
+    excel_file_path = "your_excel_file.xlsx"  # 替换为您的文件路径
     
     try:
-        x, y, z = analyze_site_based_wafer_data(csv_file_path)
+        # 执行完整分析
+        result_df = analyze_excel_cd_difference(excel_file_path)
+        
+        if result_df is not None:
+            print("\n=== 分析完成 ===")
+            print("生成的文件:")
+            print("1. CD差值wafer map")
+            print("2. AEI vs ADI对比图")
+            print("3. CD_Difference_Analysis_Results.xlsx")
+            
     except FileNotFoundError:
-        print("请将 'your_wafer_data.csv' 替换为您的实际CSV文件路径")
+        print(f"找不到文件: {excel_file_path}")
+        print("请确认文件路径正确，并且文件包含'AEI'和'ADI'两个分页")
         
-        # 创建示例数据
-        print("正在创建示例数据...")
-        
-        np.random.seed(42)
-        # 模拟规则网格上的测量点
-        x_grid = np.linspace(-75, 75, 12)
-        y_grid = np.linspace(-75, 75, 10)
-        X_grid, Y_grid = np.meshgrid(x_grid, y_grid)
-        
-        # 只保留圆形区域内的点
-        mask = X_grid**2 + Y_grid**2 <= 75**2
-        x_demo = X_grid[mask].flatten()
-        y_demo = Y_grid[mask].flatten()
-        
-        # 创建模拟CD数据
-        z_demo = (415 + 
-                 20 * np.sin(2 * np.arctan2(y_demo, x_demo)) +  # 角度变化
-                 10 * np.sqrt(x_demo**2 + y_demo**2) / 75 +     # 径向变化
-                 np.random.normal(0, 5, len(x_demo)))           # 噪声
-        
-        print("示例数据演示（基于站点的方法）：")
-        
-        # 圆形点风格（推荐，更接近系统样式）
-        fig1 = plot_site_based_wafer_map(x_demo, y_demo, z_demo, 
-                                        title="示例 - System-Style (Circle Points)",
-                                        show_sites=True, site_style='circle',
-                                        vmin=400, vmax=430)  # 自定义colorbar范围
-        plt.show()
-        
-        # Scatter风格
-        fig2 = plot_site_based_wafer_map(x_demo, y_demo, z_demo, 
-                                        title="示例 - System-Style (Scatter Points)",
-                                        show_sites=True, site_style='scatter')
-        plt.show()
+    except Exception as e:
+        print(f"分析过程中出错: {e}")
 
 # 快速使用函数
-def quick_site_based_plot(csv_file_path, plot_type='site_based', vmin=None, vmax=None, site_style='circle'):
-    """快速生成基于站点的wafer map"""
-    x, y, z = load_wafer_data(csv_file_path)
-    if x is None:
+def quick_cd_difference_analysis(excel_file_path, sheet_aei='AEI', sheet_adi='ADI'):
+    """
+    快速CD差值分析
+    
+    Parameters:
+    excel_file_path: Excel文件路径
+    sheet_aei: AEI分页名称（默认'AEI'）
+    sheet_adi: ADI分页名称（默认'ADI'）
+    
+    Returns:
+    result_df: 分析结果DataFrame
+    """
+    df_aei, df_adi = read_excel_sheets(excel_file_path, sheet_aei, sheet_adi)
+    if df_aei is None or df_adi is None:
         return None
     
-    if plot_type == 'site_based':
-        return plot_site_based_wafer_map(x, y, z, vmin=vmin, vmax=vmax, site_style=site_style)
-    elif plot_type == 'comparison':
-        return plot_comparison_interpolation_methods(x, y, z)
-    else:
-        return plot_discrete_with_site_values(x, y, z)
+    result_df = calculate_cd_difference(df_aei, df_adi)
+    if result_df is None:
+        return None
+    
+    # 生成基本可视化
+    plot_cd_difference_map(result_df)
+    plt.show()
+    
+    return result_df
