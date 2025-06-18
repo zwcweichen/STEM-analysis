@@ -1,0 +1,422 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+from matplotlib.colors import LinearSegmentedColormap
+from scipy.interpolate import griddata
+import matplotlib.patches as patches
+
+# 创建自定义colormap（模仿图片中的颜色方案）
+colors = ['#000080', '#0000FF', '#0080FF', '#00FFFF', '#80FF80', '#FFFF00', '#FF8000', '#FF0000', '#800000']
+n_bins = 256
+cmap_custom = LinearSegmentedColormap.from_list('wafer', colors, N=n_bins)
+
+def load_wafer_data(csv_file_path):
+    """
+    从CSV文件加载wafer数据
+    
+    Parameters:
+    csv_file_path: CSV文件路径
+    
+    Returns:
+    x, y, z: 坐标和测量值数组
+    """
+    try:
+        # 读取CSV文件
+        df = pd.read_csv(csv_file_path)
+        
+        # 检查必要的列是否存在
+        required_columns = ['Location x', 'Location y', 'CD']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        
+        if missing_columns:
+            print(f"警告：缺少以下列: {missing_columns}")
+            print(f"可用的列: {list(df.columns)}")
+            return None, None, None
+        
+        # 提取数据
+        x = df['Location x'].values
+        y = df['Location y'].values
+        z = df['CD'].values
+        
+        # 移除NaN值
+        valid_mask = ~(np.isnan(x) | np.isnan(y) | np.isnan(z))
+        x = x[valid_mask]
+        y = y[valid_mask]
+        z = z[valid_mask]
+        
+        print(f"成功加载数据：{len(x)} 个有效数据点")
+        print(f"X范围: {x.min():.2f} 到 {x.max():.2f}")
+        print(f"Y范围: {y.min():.2f} 到 {y.max():.2f}")
+        print(f"CD范围: {z.min():.2f} 到 {z.max():.2f}")
+        
+        return x, y, z
+        
+    except Exception as e:
+        print(f"读取CSV文件时出错: {e}")
+        return None, None, None
+
+def create_wafer_mask(xi, yi, center_x=None, center_y=None, radius=None):
+    """
+    创建圆形wafer遮罩
+    
+    Parameters:
+    xi, yi: 网格坐标
+    center_x, center_y: wafer中心（如果为None则自动计算）
+    radius: wafer半径（如果为None则自动计算）
+    
+    Returns:
+    mask: 布尔遮罩数组
+    """
+    if center_x is None:
+        center_x = (xi.max() + xi.min()) / 2
+    if center_y is None:
+        center_y = (yi.max() + yi.min()) / 2
+    if radius is None:
+        radius = min((xi.max() - xi.min()) / 2, (yi.max() - yi.min()) / 2) * 0.9
+    
+    mask = (xi - center_x)**2 + (yi - center_y)**2 <= radius**2
+    return mask
+
+def plot_continuous_wafer_map(x, y, z, title="Continuous Wafer Map (CD)", figsize=(12, 10)):
+    """
+    绘制连续性wafer map
+    
+    Parameters:
+    x, y, z: 坐标和测量值
+    title: 图表标题
+    figsize: 图形大小
+    
+    Returns:
+    fig: matplotlib图形对象
+    """
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    
+    # 创建插值网格
+    grid_density = 200
+    xi = np.linspace(x.min(), x.max(), grid_density)
+    yi = np.linspace(y.min(), y.max(), grid_density)
+    Xi, Yi = np.meshgrid(xi, yi)
+    
+    # 插值
+    try:
+        Zi = griddata((x, y), z, (Xi, Yi), method='cubic')
+    except:
+        # 如果cubic插值失败，使用linear
+        Zi = griddata((x, y), z, (Xi, Yi), method='linear')
+    
+    # 应用wafer遮罩
+    mask = create_wafer_mask(Xi, Yi)
+    Zi[~mask] = np.nan
+    
+    # 绘制contour填充图
+    levels = 50
+    contour = ax.contourf(Xi, Yi, Zi, levels=levels, cmap=cmap_custom, extend='both')
+    
+    # 添加等高线
+    contour_lines = ax.contour(Xi, Yi, Zi, levels=20, colors='black', alpha=0.2, linewidths=0.5)
+    
+    # 添加原始数据点
+    scatter = ax.scatter(x, y, c=z, s=30, cmap=cmap_custom, 
+                        edgecolors='black', linewidth=0.5, alpha=0.8, zorder=5)
+    
+    # 添加wafer边界圆
+    center_x = (x.max() + x.min()) / 2
+    center_y = (y.max() + y.min()) / 2
+    radius = min((x.max() - x.min()) / 2, (y.max() - y.min()) / 2) * 0.9
+    circle = plt.Circle((center_x, center_y), radius, fill=False, color='black', linewidth=2)
+    ax.add_patch(circle)
+    
+    # 添加颜色条
+    cbar = plt.colorbar(contour, ax=ax, shrink=0.8)
+    cbar.set_label('CD Value (nm)', fontsize=12)
+    
+    # 设置坐标轴
+    margin = (x.max() - x.min()) * 0.05
+    ax.set_xlim(x.min() - margin, x.max() + margin)
+    ax.set_ylim(y.min() - margin, y.max() + margin)
+    ax.set_aspect('equal')
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.set_xlabel('Location X (mm)', fontsize=12)
+    ax.set_ylabel('Location Y (mm)', fontsize=12)
+    ax.grid(True, alpha=0.3)
+    
+    # 添加统计信息
+    stats_text = f'Points: {len(x)}\nMean: {np.mean(z):.2f}\nStd: {np.std(z):.2f}\nRange: {z.min():.2f} - {z.max():.2f}'
+    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=10,
+            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
+    plt.tight_layout()
+    return fig
+
+def plot_discrete_wafer_map(x, y, z, grid_size=None, title="Discrete Wafer Map (CD)", figsize=(12, 10)):
+    """
+    绘制离散网格wafer map
+    
+    Parameters:
+    x, y, z: 坐标和测量值
+    grid_size: 网格大小（如果为None则自动计算）
+    title: 图表标题
+    figsize: 图形大小
+    
+    Returns:
+    fig: matplotlib图形对象
+    """
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    
+    if grid_size is None:
+        # 自动计算合适的网格大小
+        unique_x = np.unique(x)
+        unique_y = np.unique(y)
+        grid_size = min(len(unique_x), len(unique_y), 20)  # 限制最大网格大小
+    
+    # 创建网格
+    x_bins = np.linspace(x.min(), x.max(), grid_size + 1)
+    y_bins = np.linspace(y.min(), y.max(), grid_size + 1)
+    
+    # 计算每个网格的平均值
+    grid_data = np.full((grid_size, grid_size), np.nan)
+    grid_counts = np.zeros((grid_size, grid_size))
+    
+    for i in range(len(x)):
+        x_idx = np.digitize(x[i], x_bins) - 1
+        y_idx = np.digitize(y[i], y_bins) - 1
+        
+        # 确保索引在有效范围内
+        if 0 <= x_idx < grid_size and 0 <= y_idx < grid_size:
+            if np.isnan(grid_data[y_idx, x_idx]):
+                grid_data[y_idx, x_idx] = z[i]
+                grid_counts[y_idx, x_idx] = 1
+            else:
+                # 计算平均值
+                grid_data[y_idx, x_idx] = (grid_data[y_idx, x_idx] * grid_counts[y_idx, x_idx] + z[i]) / (grid_counts[y_idx, x_idx] + 1)
+                grid_counts[y_idx, x_idx] += 1
+    
+    # 创建wafer形状遮罩
+    center_x = grid_size / 2
+    center_y = grid_size / 2
+    radius = grid_size / 2 * 0.9
+    
+    # 绘制网格
+    for i in range(grid_size):
+        for j in range(grid_size):
+            # 检查是否在wafer范围内
+            dist_to_center = np.sqrt((j - center_x)**2 + (i - center_y)**2)
+            if dist_to_center <= radius and not np.isnan(grid_data[i, j]):
+                # 计算颜色
+                norm_value = (grid_data[i, j] - np.nanmin(z)) / (np.nanmax(z) - np.nanmin(z))
+                color = cmap_custom(norm_value)
+                
+                # 绘制矩形
+                rect = patches.Rectangle((j-0.4, grid_size-1-i-0.4), 0.8, 0.8, 
+                                       linewidth=1, edgecolor='black', facecolor=color)
+                ax.add_patch(rect)
+                
+                # 添加数值标签（如果网格不太大）
+                if grid_size <= 15:
+                    ax.text(j, grid_size-1-i, f'{grid_data[i, j]:.1f}', 
+                           ha='center', va='center', fontsize=8, fontweight='bold')
+    
+    # 设置坐标轴
+    ax.set_xlim(-1, grid_size)
+    ax.set_ylim(-1, grid_size)
+    ax.set_aspect('equal')
+    
+    # 添加网格线
+    ax.set_xticks(range(-1, grid_size+1))
+    ax.set_yticks(range(-1, grid_size+1))
+    ax.grid(True, alpha=0.3)
+    
+    # 设置标签和标题
+    ax.set_xlabel('X Grid Index', fontsize=12)
+    ax.set_ylabel('Y Grid Index', fontsize=12)
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    
+    # 添加颜色条
+    sm = plt.cm.ScalarMappable(cmap=cmap_custom)
+    sm.set_array(z)
+    cbar = plt.colorbar(sm, ax=ax, shrink=0.8)
+    cbar.set_label('CD Value (nm)', fontsize=12)
+    
+    plt.tight_layout()
+    return fig
+
+def plot_both_wafer_maps(x, y, z, figsize=(18, 8)):
+    """
+    在同一图中显示两种wafer map风格
+    
+    Parameters:
+    x, y, z: 坐标和测量值
+    figsize: 图形大小
+    
+    Returns:
+    fig: matplotlib图形对象
+    """
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+    
+    # 左图：连续性图
+    grid_density = 150
+    xi = np.linspace(x.min(), x.max(), grid_density)
+    yi = np.linspace(y.min(), y.max(), grid_density)
+    Xi, Yi = np.meshgrid(xi, yi)
+    
+    try:
+        Zi = griddata((x, y), z, (Xi, Yi), method='cubic')
+    except:
+        Zi = griddata((x, y), z, (Xi, Yi), method='linear')
+    
+    mask = create_wafer_mask(Xi, Yi)
+    Zi[~mask] = np.nan
+    
+    contour1 = ax1.contourf(Xi, Yi, Zi, levels=50, cmap=cmap_custom, extend='both')
+    ax1.contour(Xi, Yi, Zi, levels=15, colors='black', alpha=0.2, linewidths=0.5)
+    ax1.scatter(x, y, c=z, s=20, cmap=cmap_custom, 
+               edgecolors='black', linewidth=0.5, alpha=0.8)
+    
+    # 添加wafer边界
+    center_x = (x.max() + x.min()) / 2
+    center_y = (y.max() + y.min()) / 2
+    radius = min((x.max() - x.min()) / 2, (y.max() - y.min()) / 2) * 0.9
+    circle1 = plt.Circle((center_x, center_y), radius, fill=False, color='black', linewidth=2)
+    ax1.add_patch(circle1)
+    
+    margin = (x.max() - x.min()) * 0.05
+    ax1.set_xlim(x.min() - margin, x.max() + margin)
+    ax1.set_ylim(y.min() - margin, y.max() + margin)
+    ax1.set_aspect('equal')
+    ax1.set_title('Continuous Wafer Map', fontsize=12, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    ax1.set_xlabel('Location X (mm)', fontsize=10)
+    ax1.set_ylabel('Location Y (mm)', fontsize=10)
+    
+    # 右图：离散网格图（简化版）
+    grid_size = 15
+    x_bins = np.linspace(x.min(), x.max(), grid_size + 1)
+    y_bins = np.linspace(y.min(), y.max(), grid_size + 1)
+    
+    grid_data = np.full((grid_size, grid_size), np.nan)
+    for i in range(len(x)):
+        x_idx = np.digitize(x[i], x_bins) - 1
+        y_idx = np.digitize(y[i], y_bins) - 1
+        if 0 <= x_idx < grid_size and 0 <= y_idx < grid_size:
+            if np.isnan(grid_data[y_idx, x_idx]):
+                grid_data[y_idx, x_idx] = z[i]
+    
+    center_x_grid = grid_size / 2
+    center_y_grid = grid_size / 2
+    radius_grid = grid_size / 2 * 0.9
+    
+    for i in range(grid_size):
+        for j in range(grid_size):
+            dist_to_center = np.sqrt((j - center_x_grid)**2 + (i - center_y_grid)**2)
+            if dist_to_center <= radius_grid and not np.isnan(grid_data[i, j]):
+                norm_value = (grid_data[i, j] - z.min()) / (z.max() - z.min())
+                color = cmap_custom(norm_value)
+                
+                rect = patches.Rectangle((j-0.4, grid_size-1-i-0.4), 0.8, 0.8, 
+                                       linewidth=1, edgecolor='black', facecolor=color)
+                ax2.add_patch(rect)
+                
+                ax2.text(j, grid_size-1-i, f'{grid_data[i, j]:.0f}', 
+                        ha='center', va='center', fontsize=7, fontweight='bold')
+    
+    ax2.set_xlim(-1, grid_size)
+    ax2.set_ylim(-1, grid_size)
+    ax2.set_aspect('equal')
+    ax2.set_title('Discrete Wafer Map', fontsize=12, fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    ax2.set_xlabel('X Grid Index', fontsize=10)
+    ax2.set_ylabel('Y Grid Index', fontsize=10)
+    
+    # 共享颜色条
+    cbar = fig.colorbar(contour1, ax=[ax1, ax2], shrink=0.8, pad=0.1)
+    cbar.set_label('CD Value (nm)', fontsize=12)
+    
+    plt.tight_layout()
+    return fig
+
+def analyze_wafer_data(csv_file_path):
+    """
+    完整的wafer数据分析和可视化流程
+    
+    Parameters:
+    csv_file_path: CSV文件路径
+    """
+    # 加载数据
+    x, y, z = load_wafer_data(csv_file_path)
+    
+    if x is None:
+        print("无法加载数据，请检查文件路径和格式")
+        return
+    
+    # 显示数据统计
+    print("\n=== 数据统计 ===")
+    print(f"数据点数量: {len(x)}")
+    print(f"CD平均值: {np.mean(z):.3f} nm")
+    print(f"CD标准差: {np.std(z):.3f} nm")
+    print(f"CD范围: {z.min():.3f} - {z.max():.3f} nm")
+    
+    # 生成三种可视化
+    print("\n正在生成可视化图表...")
+    
+    # 连续性图
+    fig1 = plot_continuous_wafer_map(x, y, z)
+    plt.show()
+    
+    # 离散网格图
+    fig2 = plot_discrete_wafer_map(x, y, z)
+    plt.show()
+    
+    # 组合图
+    fig3 = plot_both_wafer_maps(x, y, z)
+    plt.show()
+    
+    return x, y, z
+
+# 使用示例
+if __name__ == "__main__":
+    # 请将此路径替换为您的CSV文件路径
+    csv_file_path = "your_wafer_data.csv"  # 替换为您的文件路径
+    
+    # 执行完整分析
+    try:
+        x, y, z = analyze_wafer_data(csv_file_path)
+    except FileNotFoundError:
+        print("请将 'your_wafer_data.csv' 替换为您的实际CSV文件路径")
+        
+        # 如果没有文件，创建一个示例来演示
+        print("正在创建示例数据进行演示...")
+        
+        # 创建示例数据
+        np.random.seed(42)
+        theta = np.random.uniform(0, 2*np.pi, 100)
+        r = np.random.uniform(0, 75, 100)
+        x_demo = r * np.cos(theta)
+        y_demo = r * np.sin(theta)
+        z_demo = 420 + 50 * np.sin(2*theta) + 20 * (r/75) + np.random.normal(0, 10, 100)
+        
+        print("示例数据演示：")
+        fig1 = plot_continuous_wafer_map(x_demo, y_demo, z_demo, title="示例 - Continuous Wafer Map")
+        plt.show()
+        
+        fig2 = plot_discrete_wafer_map(x_demo, y_demo, z_demo, title="示例 - Discrete Wafer Map")
+        plt.show()
+
+# 快速使用函数（如果您想直接调用）
+def quick_wafer_plot(csv_file_path, plot_type='both'):
+    """
+    快速生成wafer map
+    
+    Parameters:
+    csv_file_path: CSV文件路径
+    plot_type: 'continuous', 'discrete', 或 'both'
+    """
+    x, y, z = load_wafer_data(csv_file_path)
+    if x is None:
+        return None
+    
+    if plot_type == 'continuous':
+        return plot_continuous_wafer_map(x, y, z)
+    elif plot_type == 'discrete':
+        return plot_discrete_wafer_map(x, y, z)
+    else:
+        return plot_both_wafer_maps(x, y, z)
