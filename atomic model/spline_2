@@ -1,0 +1,248 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.interpolate import UnivariateSpline
+
+def fit_smooth_curve(x, y, smoothness='auto', plot=True):
+    """
+    使用 UnivariateSpline 擬合平滑曲線
+    
+    參數：
+    x, y: 您的數據
+    smoothness: 平滑程度 ('auto', 'low', 'medium', 'high', 或數值)
+    plot: 是否繪圖
+    
+    返回：
+    spline: 擬合的 spline 函數
+    """
+    
+    # 轉換為 numpy 陣列
+    x = np.asarray(x)
+    y = np.asarray(y)
+    
+    # 排序數據（UnivariateSpline 需要 x 是遞增的）
+    sort_idx = np.argsort(x)
+    x_sorted = x[sort_idx]
+    y_sorted = y[sort_idx]
+    
+    # 設定平滑參數 s
+    if smoothness == 'auto':
+        s = len(x)  # 自動選擇
+    elif smoothness == 'low':
+        s = len(x) * 0.1  # 低平滑（更接近原始數據）
+    elif smoothness == 'medium':
+        s = len(x) * 1.0  # 中等平滑
+    elif smoothness == 'high':
+        s = len(x) * 10.0  # 高平滑
+    else:
+        s = smoothness  # 直接使用數值
+    
+    # 建立 UnivariateSpline
+    spline = UnivariateSpline(x_sorted, y_sorted, s=s)
+    
+    if plot:
+        # 創建密集的 x 點用於繪製平滑曲線
+        x_dense = np.linspace(x_sorted.min(), x_sorted.max(), 200)
+        y_smooth = spline(x_dense)
+        
+        # 繪圖
+        plt.figure(figsize=(10, 6))
+        plt.scatter(x, y, color='blue', s=50, alpha=0.7, label='原始數據')
+        plt.plot(x_dense, y_smooth, 'red', linewidth=2, label=f'平滑曲線 (s={s:.1f})')
+        plt.xlabel('X')
+        plt.ylabel('Y')
+        plt.title('UnivariateSpline 平滑曲線擬合')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.show()
+        
+        print(f"平滑參數 s = {s:.2f}")
+        print(f"數據點數量 = {len(x)}")
+    
+    return spline
+
+# ================================================================
+# 範例 1: 基本使用
+# ================================================================
+print("=== UnivariateSpline 基本使用範例 ===\n")
+
+# 生成示例數據（您可以替換為自己的 x, y 數據）
+x_example = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+y_example = np.array([2.1, 3.8, 5.9, 8.2, 9.8, 11.5, 13.1, 14.9, 16.8, 18.2])
+# 添加一些噪音
+y_example = y_example + np.random.normal(0, 0.5, len(y_example))
+
+print("使用您的數據：")
+print(f"x = {x_example}")
+print(f"y = {y_example}")
+
+# 擬合平滑曲線
+spline = fit_smooth_curve(x_example, y_example, smoothness='medium')
+
+# ================================================================
+# 範例 2: 比較不同平滑程度
+# ================================================================
+print("\n=== 比較不同平滑程度 ===")
+
+smoothness_levels = ['low', 'medium', 'high']
+colors = ['green', 'red', 'blue']
+
+plt.figure(figsize=(12, 8))
+
+# 原始數據
+plt.scatter(x_example, y_example, color='black', s=60, alpha=0.8, 
+           label='原始數據', zorder=4)
+
+# 密集 x 點用於繪圖
+x_dense = np.linspace(x_example.min(), x_example.max(), 200)
+
+for smoothness, color in zip(smoothness_levels, colors):
+    spline_temp = fit_smooth_curve(x_example, y_example, 
+                                  smoothness=smoothness, plot=False)
+    y_smooth_temp = spline_temp(x_dense)
+    
+    plt.plot(x_dense, y_smooth_temp, color=color, linewidth=2, 
+             label=f'{smoothness} 平滑', zorder=3)
+
+plt.xlabel('X')
+plt.ylabel('Y')
+plt.title('不同平滑程度的比較')
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.show()
+
+# ================================================================
+# 範例 3: 手動設定平滑參數
+# ================================================================
+print("\n=== 手動設定平滑參數 ===")
+
+# 測試不同的 s 值
+s_values = [0.1, 1.0, 10.0, 50.0]
+
+plt.figure(figsize=(15, 10))
+
+for i, s_val in enumerate(s_values):
+    plt.subplot(2, 2, i+1)
+    
+    spline_manual = fit_smooth_curve(x_example, y_example, 
+                                   smoothness=s_val, plot=False)
+    y_smooth_manual = spline_manual(x_dense)
+    
+    plt.scatter(x_example, y_example, color='blue', s=40, alpha=0.7)
+    plt.plot(x_dense, y_smooth_manual, 'red', linewidth=2)
+    plt.title(f's = {s_val}')
+    plt.xlabel('X')
+    plt.ylabel('Y')
+    plt.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+# ================================================================
+# 範例 4: 實際使用 - 預測新點
+# ================================================================
+print("\n=== 實際使用 - 預測新點 ===")
+
+# 使用最佳 spline
+best_spline = fit_smooth_curve(x_example, y_example, smoothness='medium', plot=False)
+
+# 在原始點上的擬合值
+y_fitted = best_spline(x_example)
+print("原始點的擬合值：")
+for i in range(len(x_example)):
+    print(f"  x={x_example[i]:4.1f}, 原始y={y_example[i]:5.2f}, 擬合y={y_fitted[i]:5.2f}")
+
+# 預測新點
+x_new = [1.5, 3.7, 5.5, 8.2]
+y_pred = best_spline(x_new)
+print(f"\n新點預測：")
+for i in range(len(x_new)):
+    print(f"  x={x_new[i]:4.1f}, 預測y={y_pred[i]:5.2f}")
+
+# 可視化預測
+plt.figure(figsize=(10, 6))
+plt.scatter(x_example, y_example, color='blue', s=60, alpha=0.7, label='原始數據')
+plt.plot(x_dense, best_spline(x_dense), 'red', linewidth=2, label='平滑曲線')
+plt.scatter(x_new, y_pred, color='green', s=100, marker='x', 
+           linewidth=3, label='新點預測')
+
+# 標註預測點
+for x_val, y_val in zip(x_new, y_pred):
+    plt.annotate(f'({x_val}, {y_val:.2f})', 
+                (x_val, y_val), xytext=(5, 5), textcoords='offset points')
+
+plt.xlabel('X')
+plt.ylabel('Y')
+plt.title('UnivariateSpline 預測新點')
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.show()
+
+# ================================================================
+# 簡化版本 - 直接使用您的數據
+# ================================================================
+print("\n=== 簡化版本 - 直接使用您的數據 ===")
+
+def simple_smooth_curve(x, y, s_factor=1.0):
+    """
+    最簡化版本 - 直接擬合平滑曲線
+    
+    參數：
+    x, y: 您的數據
+    s_factor: 平滑係數，越大越平滑
+    
+    返回：
+    spline 函數
+    """
+    x = np.asarray(x)
+    y = np.asarray(y)
+    
+    # 排序
+    sort_idx = np.argsort(x)
+    x_sorted = x[sort_idx]
+    y_sorted = y[sort_idx]
+    
+    # 平滑參數
+    s = len(x) * s_factor
+    
+    # 建立 spline
+    spline = UnivariateSpline(x_sorted, y_sorted, s=s)
+    
+    return spline
+
+# 使用方法
+print("最簡單的使用方法：")
+print("""
+# 您的數據
+x = [您的x數據]
+y = [您的y數據]
+
+# 擬合平滑曲線
+spline = simple_smooth_curve(x, y, s_factor=1.0)
+
+# 獲得平滑值
+x_smooth = np.linspace(min(x), max(x), 100)
+y_smooth = spline(x_smooth)
+
+# 繪圖
+plt.scatter(x, y, label='原始數據')
+plt.plot(x_smooth, y_smooth, label='平滑曲線')
+plt.legend()
+plt.show()
+""")
+
+# 最終示例
+my_spline = simple_smooth_curve(x_example, y_example, s_factor=1.0)
+x_smooth = np.linspace(x_example.min(), x_example.max(), 100)
+y_smooth = my_spline(x_smooth)
+
+plt.figure(figsize=(10, 6))
+plt.scatter(x_example, y_example, color='blue', s=50, alpha=0.7, label='原始數據')
+plt.plot(x_smooth, y_smooth, 'red', linewidth=2, label='平滑曲線')
+plt.xlabel('X')
+plt.ylabel('Y')
+plt.title('簡化版本 - 直接使用')
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.show()
+
+print("\n完成！現在您可以用自己的 x, y 數據來試試了。")
