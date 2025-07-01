@@ -1,0 +1,295 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import sparse
+from scipy.sparse.linalg import spsolve
+from scipy.interpolate import interp1d
+import pandas as pd
+
+class JMPStyleSmoothingSpline:
+    """
+    模擬 JMP 軟體中的 smoothing spline 功能
+    主要參數：
+    - lambda_smooth: 平滑參數 (對應 JMP 的 lambda)
+    - standardize_x: 是否標準化 X 變數 (對應 JMP 的 Standardize X)
+    - trim_outliers: outlier 處理參數 (模擬可能的 trim 功能)
+    """
+    
+    def __init__(self, lambda_smooth=0.05, standardize_x=True, trim_outliers=None):
+        self.lambda_smooth = lambda_smooth
+        self.standardize_x = standardize_x
+        self.trim_outliers = trim_outliers
+        self.x_mean = None
+        self.x_std = None
+        self.fitted_values = None
+        self.coefficients = None
+        
+    def _standardize_x(self, x):
+        """標準化 X 變數"""
+        if self.standardize_x:
+            self.x_mean = np.mean(x)
+            self.x_std = np.std(x)
+            return (x - self.x_mean) / self.x_std
+        return x
+    
+    def _unstandardize_x(self, x_std):
+        """反標準化 X 變數"""
+        if self.standardize_x:
+            return x_std * self.x_std + self.x_mean
+        return x_std
+    
+    def _trim_data(self, x, y):
+        """處理 outliers (模擬可能的 trim 功能)"""
+        if self.trim_outliers is None:
+            return x, y
+            
+        # 計算 z-score 來識別 outliers
+        z_scores_x = np.abs((x - np.mean(x)) / np.std(x))
+        z_scores_y = np.abs((y - np.mean(y)) / np.std(y))
+        
+        # 保留非 outlier 的數據點
+        mask = (z_scores_x < self.trim_outliers) & (z_scores_y < self.trim_outliers)
+        return x[mask], y[mask]
+    
+    def _create_penalty_matrix(self, n):
+        """創建二階差分懲罰矩陣"""
+        # 創建二階差分矩陣
+        diff_matrix = sparse.diags([1, -2, 1], [0, 1, 2], shape=(n-2, n))
+        # 懲罰矩陣 = D'D
+        penalty_matrix = diff_matrix.T @ diff_matrix
+        return penalty_matrix
+    
+    def fit(self, x, y):
+        """
+        擬合 smoothing spline
+        
+        參數:
+        x: 自變數
+        y: 因變數
+        
+        返回:
+        self: 擬合後的模型
+        """
+        # 轉換為 numpy 陣列
+        x = np.asarray(x)
+        y = np.asarray(y)
+        
+        # 處理 outliers
+        if self.trim_outliers is not None:
+            x, y = self._trim_data(x, y)
+        
+        # 排序數據
+        sort_idx = np.argsort(x)
+        x_sorted = x[sort_idx]
+        y_sorted = y[sort_idx]
+        
+        # 標準化 X
+        x_std = self._standardize_x(x_sorted)
+        
+        n = len(x_std)
+        
+        # 創建懲罰矩陣
+        penalty_matrix = self._create_penalty_matrix(n)
+        
+        # 創建平滑矩陣: (I + λP)
+        identity = sparse.identity(n)
+        smooth_matrix = identity + self.lambda_smooth * penalty_matrix
+        
+        # 求解平滑方程: (I + λP)c = y
+        self.coefficients = spsolve(smooth_matrix, y_sorted)
+        
+        # 儲存擬合值
+        self.fitted_values = self.coefficients
+        self.x_fitted = x_sorted
+        self.x_std_fitted = x_std
+        
+        return self
+    
+    def predict(self, x_new):
+        """
+        對新的 X 值進行預測
+        
+        參數:
+        x_new: 新的 X 值
+        
+        返回:
+        predicted: 預測的 Y 值
+        """
+        if self.fitted_values is None:
+            raise ValueError("模型尚未擬合，請先調用 fit() 方法")
+        
+        x_new = np.asarray(x_new)
+        
+        # 標準化新的 X 值
+        if self.standardize_x:
+            x_new_std = (x_new - self.x_mean) / self.x_std
+        else:
+            x_new_std = x_new
+        
+        # 使用插值進行預測
+        interpolator = interp1d(self.x_std_fitted, self.fitted_values, 
+                               kind='cubic', bounds_error=False, 
+                               fill_value='extrapolate')
+        
+        return interpolator(x_new_std)
+    
+    def plot(self, x, y, x_new=None, title="JMP Style Smoothing Spline"):
+        """
+        繪製原始數據和擬合曲線
+        
+        參數:
+        x: 原始 X 數據
+        y: 原始 Y 數據
+        x_new: 用於繪製平滑曲線的 X 值 (可選)
+        title: 圖表標題
+        """
+        plt.figure(figsize=(10, 6))
+        
+        # 繪製原始數據點
+        plt.scatter(x, y, alpha=0.6, color='blue', label='原始數據')
+        
+        # 繪製擬合曲線
+        if x_new is None:
+            x_new = np.linspace(np.min(x), np.max(x), 200)
+        
+        y_pred = self.predict(x_new)
+        plt.plot(x_new, y_pred, 'r-', linewidth=2, label=f'Smoothing Spline (λ={self.lambda_smooth})')
+        
+        plt.xlabel('X')
+        plt.ylabel('Y')
+        plt.title(title)
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.show()
+    
+    def get_r_squared(self, x, y):
+        """計算 R² 值"""
+        y_pred = self.predict(x)
+        ss_res = np.sum((y - y_pred) ** 2)
+        ss_tot = np.sum((y - np.mean(y)) ** 2)
+        return 1 - (ss_res / ss_tot)
+
+# 示例使用
+def example_usage():
+    """示例用法"""
+    # 生成示例數據
+    np.random.seed(42)
+    x = np.linspace(0, 10, 100)
+    y_true = np.sin(x) + 0.1 * x
+    noise = np.random.normal(0, 0.2, 100)
+    y = y_true + noise
+    
+    # 添加一些 outliers
+    outlier_indices = [20, 50, 80]
+    y[outlier_indices] += np.random.normal(0, 1, 3)
+    
+    print("=== JMP 風格 Smoothing Spline 示例 ===\n")
+    
+    # 測試不同的 lambda 值
+    lambda_values = [0.01, 0.05, 0.1, 1.0]
+    
+    plt.figure(figsize=(15, 10))
+    
+    for i, lambda_val in enumerate(lambda_values):
+        plt.subplot(2, 2, i+1)
+        
+        # 創建模型
+        spline = JMPStyleSmoothingSpline(
+            lambda_smooth=lambda_val,
+            standardize_x=True,
+            trim_outliers=None  # 可以設為 2.5 來移除 outliers
+        )
+        
+        # 擬合模型
+        spline.fit(x, y)
+        
+        # 預測
+        x_new = np.linspace(0, 10, 200)
+        y_pred = spline.predict(x_new)
+        
+        # 繪圖
+        plt.scatter(x, y, alpha=0.6, color='blue', s=20)
+        plt.plot(x_new, y_pred, 'r-', linewidth=2)
+        plt.plot(x, y_true, 'g--', alpha=0.7, label='真實函數')
+        
+        r2 = spline.get_r_squared(x, y)
+        plt.title(f'λ = {lambda_val}, R² = {r2:.3f}')
+        plt.xlabel('X')
+        plt.ylabel('Y')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+    
+    plt.tight_layout()
+    plt.suptitle('不同 Lambda 值的 Smoothing Spline 比較', y=1.02, fontsize=14)
+    plt.show()
+    
+    # 測試 outlier trimming 功能
+    print("\n=== 測試 Outlier Trimming 功能 ===")
+    
+    plt.figure(figsize=(12, 5))
+    
+    # 不處理 outliers
+    plt.subplot(1, 2, 1)
+    spline_no_trim = JMPStyleSmoothingSpline(lambda_smooth=0.05, trim_outliers=None)
+    spline_no_trim.fit(x, y)
+    y_pred_no_trim = spline_no_trim.predict(x_new)
+    
+    plt.scatter(x, y, alpha=0.6, color='blue', s=20)
+    plt.plot(x_new, y_pred_no_trim, 'r-', linewidth=2)
+    plt.title('無 Outlier 處理')
+    plt.xlabel('X')
+    plt.ylabel('Y')
+    plt.grid(True, alpha=0.3)
+    
+    # 處理 outliers
+    plt.subplot(1, 2, 2)
+    spline_with_trim = JMPStyleSmoothingSpline(lambda_smooth=0.05, trim_outliers=2.5)
+    spline_with_trim.fit(x, y)
+    y_pred_with_trim = spline_with_trim.predict(x_new)
+    
+    plt.scatter(x, y, alpha=0.6, color='blue', s=20)
+    plt.plot(x_new, y_pred_with_trim, 'r-', linewidth=2)
+    plt.title('使用 Outlier Trimming (z > 2.5)')
+    plt.xlabel('X')
+    plt.ylabel('Y')
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # 比較標準化的影響
+    print("\n=== 比較標準化 X 的影響 ===")
+    
+    plt.figure(figsize=(12, 5))
+    
+    # 不標準化
+    plt.subplot(1, 2, 1)
+    spline_no_std = JMPStyleSmoothingSpline(lambda_smooth=0.05, standardize_x=False)
+    spline_no_std.fit(x, y)
+    y_pred_no_std = spline_no_std.predict(x_new)
+    
+    plt.scatter(x, y, alpha=0.6, color='blue', s=20)
+    plt.plot(x_new, y_pred_no_std, 'r-', linewidth=2)
+    plt.title('不標準化 X')
+    plt.xlabel('X')
+    plt.ylabel('Y')
+    plt.grid(True, alpha=0.3)
+    
+    # 標準化
+    plt.subplot(1, 2, 2)
+    spline_std = JMPStyleSmoothingSpline(lambda_smooth=0.05, standardize_x=True)
+    spline_std.fit(x, y)
+    y_pred_std = spline_std.predict(x_new)
+    
+    plt.scatter(x, y, alpha=0.6, color='blue', s=20)
+    plt.plot(x_new, y_pred_std, 'r-', linewidth=2)
+    plt.title('標準化 X')
+    plt.xlabel('X')
+    plt.ylabel('Y')
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+
+# 如果直接運行此腳本，執行示例
+if __name__ == "__main__":
+    example_usage()
